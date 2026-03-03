@@ -1,0 +1,333 @@
+---
+title: "Integration Guide"
+description: "Step-by-step guide to integrating x402 payments"
+---
+
+## Installation
+
+Install the Merchant SDK and required dependencies:
+
+```bash
+npm install @shielded-x402/merchant viem
+```
+
+## Express Middleware Integration
+
+The fastest way to integrate x402 payments is using the Express middleware.
+
+<Steps>
+  <Step title="Create Verifier Adapter">
+    The verifier adapter checks proof validity and nullifier usage:
+
+    ```typescript
+    import { createOnchainVerifier } from './lib/verifier';
+    import type { VerifierAdapter } from './lib/verifier';
+
+    const verifier: VerifierAdapter = createOnchainVerifier({
+      rpcUrl: process.env.SEPOLIA_RPC_URL!,
+      shieldedPoolAddress: '0x...',
+      ultraVerifierAddress: '0x...'
+    });
+    ```
+
+    <Accordion title="Development mode: Allow-all verifier">
+      For local testing only, use the allow-all verifier:
+
+      ```typescript
+      import { createAllowAllVerifier } from './lib/verifier';
+
+      const verifier = createAllowAllVerifier();
+      ```
+
+      <Warning>
+        Never use `createAllowAllVerifier()` in production. It bypasses all security checks.
+      </Warning>
+    </Accordion>
+  </Step>
+
+  <Step title="Create Settlement Adapter">
+    The settlement adapter handles on-chain payment confirmation:
+
+    ```typescript
+    import { createOnchainSettlement } from './lib/settlement';
+    import type { SettlementAdapter } from './lib/settlement';
+
+    const settlement: SettlementAdapter = createOnchainSettlement({
+      rpcUrl: process.env.SEPOLIA_RPC_URL!,
+      shieldedPoolAddress: '0x...',
+      relayerPrivateKey: process.env.RELAYER_PRIVATE_KEY as `0x${string}`
+    });
+    ```
+  </Step>
+
+  <Step title="Initialize SDK">
+    Configure and create the SDK instance:
+
+    ```typescript
+    import { ShieldedMerchantSDK } from '@shielded-x402/merchant';
+    import type { MerchantConfig, MerchantHooks } from '@shielded-x402/merchant';
+
+    const config: MerchantConfig = {
+      rail: 'shielded-usdc',
+      price: 1000000n, // 1 USDC
+      merchantPubKey: '0x...',
+      verifyingContract: '0x...',
+      challengeTtlMs: 180000 // 3 minutes
+    };
+
+    const hooks: MerchantHooks = {
+      verifyProof: verifier.verifyProof,
+      isNullifierUsed: verifier.isNullifierUsed
+    };
+
+    const sdk = new ShieldedMerchantSDK(config, hooks);
+    ```
+  </Step>
+
+  <Step title="Apply Middleware">
+    Protect your endpoints with the payment middleware:
+
+    ```typescript
+    import express from 'express';
+    import { createShieldedPaymentMiddleware } from './middleware/shieldedPayment';
+
+    const app = express();
+    app.use(express.json());
+
+    const paymentMiddleware = createShieldedPaymentMiddleware({
+      sdk,
+      verifier,
+      settlement
+    });
+
+    // Protect premium endpoints
+    app.get('/paid/data', paymentMiddleware, (req, res) => {
+      res.json({
+        data: 'Your premium content here',
+        requestId: crypto.randomUUID()
+      });
+    });
+    ```
+  </Step>
+</Steps>
+
+## Manual Integration
+
+For custom frameworks or fine-grained control, use the SDK methods directly.
+
+### Issuing Payment Challenges
+
+When a client makes an unpaid request, issue a 402 Payment Required response:
+
+```typescript
+import { X402_HEADERS } from '@shielded-x402/shared-types';
+import type { Request, Response } from 'express';
+
+app.get('/api/premium', async (req: Request, res: Response) => {
+  const paymentSignature = req.header(X402_HEADERS.paymentSignature);
+
+  if (!paymentSignature) {
+    // Issue payment challenge
+    const challenge = sdk.issue402();
+    
+    res.setHeader(X402_HEADERS.paymentRequired, challenge.headerValue);
+    res.status(402).json({
+      error: 'Payment Required',
+      rail: challenge.requirement.rail,
+      amount: challenge.requirement.amount,
+      challengeNonce: challenge.requirement.challengeNonce,
+      challengeExpiry: challenge.requirement.challengeExpiry
+    });
+    return;
+  }
+
+  // Continue to verification...
+});
+```
+
+### Verifying Payments
+
+Verify the payment signature and proof:
+
+```typescript
+const verification = await sdk.verifyShieldedPayment(paymentSignature);
+
+if (!verification.ok) {
+  res.status(402).json({
+    error: 'Invalid payment',
+    reason: verification.reason
+  });
+  return;
+}
+
+// Mark nullifier as used
+if (verification.payload?.nullifier) {
+  await verifier.markNullifierUsed?.(verification.payload.nullifier);
+}
+```
+
+### Settling Payments
+
+Settle the payment on-chain:
+
+```typescript
+try {
+  const settlement = await settlement.settleOnchain(verification.payload!);
+  
+  if (settlement.alreadySettled) {
+    res.status(409).json({
+      error: 'Payment already settled',
+      reason: 'nullifier already consumed onchain'
+    });
+    return;
+  }
+
+  // Confirm settlement in SDK state
+  await sdk.confirmSettlement(
+    verification.payload!.nullifier,
+    settlement.txHash
+  );
+
+  // Include settlement info in response headers
+  if (settlement.txHash) {
+    res.setHeader('x-shielded-settlement-tx', settlement.txHash);
+  }
+  res.setHeader('x-shielded-settlement', 'confirmed');
+
+  // Serve premium content
+  res.json({ data: 'Premium content' });
+} catch (error) {
+  res.status(502).json({
+    error: 'Payment settlement failed',
+    reason: error instanceof Error ? error.message : String(error)
+  });
+}
+```
+
+## Complete Example Server
+
+Here's a complete Express server with x402 payment protection:
+
+```typescript
+import express from 'express';
+import { ShieldedMerchantSDK } from '@shielded-x402/merchant';
+import { createOnchainVerifier } from './lib/verifier';
+import { createOnchainSettlement } from './lib/settlement';
+import { createShieldedPaymentMiddleware } from './middleware/shieldedPayment';
+import type { MerchantConfig, MerchantHooks } from '@shielded-x402/merchant';
+
+// Configuration
+const config: MerchantConfig = {
+  rail: 'shielded-usdc',
+  price: BigInt(process.env.PRICE_USDC_MICROS ?? '1000000'),
+  merchantPubKey: process.env.MERCHANT_PUBKEY as `0x${string}`,
+  verifyingContract: process.env.SHIELDED_POOL_ADDRESS as `0x${string}`,
+  challengeTtlMs: 180000
+};
+
+// Adapters
+const verifier = createOnchainVerifier({
+  rpcUrl: process.env.SEPOLIA_RPC_URL!,
+  shieldedPoolAddress: process.env.SHIELDED_POOL_ADDRESS as `0x${string}`,
+  ultraVerifierAddress: process.env.ULTRA_VERIFIER_ADDRESS as `0x${string}`
+});
+
+const settlement = createOnchainSettlement({
+  rpcUrl: process.env.SEPOLIA_RPC_URL!,
+  shieldedPoolAddress: process.env.SHIELDED_POOL_ADDRESS as `0x${string}`,
+  relayerPrivateKey: process.env.RELAYER_PRIVATE_KEY as `0x${string}`
+});
+
+// SDK initialization
+const hooks: MerchantHooks = {
+  verifyProof: verifier.verifyProof,
+  isNullifierUsed: verifier.isNullifierUsed
+};
+
+const sdk = new ShieldedMerchantSDK(config, hooks);
+
+// Express app
+const app = express();
+app.use(express.json());
+
+const paymentMiddleware = createShieldedPaymentMiddleware({
+  sdk,
+  verifier,
+  settlement
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ ok: true });
+});
+
+// Get payment requirement without making a request
+app.get('/x402/requirement', (req, res) => {
+  const challenge = sdk.issue402();
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ requirement: challenge.requirement });
+});
+
+// Protected endpoint
+app.get('/paid/data', paymentMiddleware, (req, res) => {
+  res.json({
+    ok: true,
+    data: { message: 'Access granted' }
+  });
+});
+
+app.listen(3000, () => {
+  console.log('Merchant server listening on port 3000');
+});
+```
+
+## Environment Variables
+
+Configure your environment:
+
+```bash
+# Required
+SEPOLIA_RPC_URL=https://sepolia.infura.io/v3/YOUR_KEY
+SHIELDED_POOL_ADDRESS=0x...
+ULTRA_VERIFIER_ADDRESS=0x...
+MERCHANT_PUBKEY=0x...
+RELAYER_PRIVATE_KEY=0x...
+
+# Optional
+PRICE_USDC_MICROS=1000000  # Default: 1 USDC
+CHALLENGE_TTL_MS=180000     # Default: 3 minutes
+```
+
+## Testing Your Integration
+
+<Steps>
+  <Step title="Start your server">
+    ```bash
+    npm start
+    ```
+  </Step>
+  <Step title="Request payment requirement">
+    ```bash
+    curl http://localhost:3000/x402/requirement
+    ```
+  </Step>
+  <Step title="Make unpaid request">
+    ```bash
+    curl http://localhost:3000/paid/data
+    # Should return 402 Payment Required
+    ```
+  </Step>
+  <Step title="Submit valid payment">
+    Use the client SDK to generate a payment proof and signature, then:
+    ```bash
+    curl -H "PAYMENT-SIGNATURE: {...}" http://localhost:3000/paid/data
+    # Should return 200 with content
+    ```
+  </Step>
+</Steps>
+
+## Next Steps
+
+<Card title="Payment Verification" icon="check" href="/merchant-sdk/verification">
+  Learn about proof verification and settlement details
+</Card>

@@ -1,0 +1,308 @@
+---
+title: 'Base/EVM Integration'
+description: 'Configure and use the Base/EVM payment adapter for native ETH transfers'
+---
+
+## Overview
+
+The Base/EVM integration provides support for native asset transfers on EVM-compatible chains, with primary support for Base (Mainnet and Sepolia testnet). The adapter uses [viem](https://viem.sh/) for blockchain interactions.
+
+## Supported Networks
+
+| Network | Chain ID | Chain Reference | RPC URL |
+|---------|----------|-----------------|----------|
+| Base Mainnet | `8453` | `eip155:8453` | `https://mainnet.base.org` |
+| Base Sepolia | `84532` | `eip155:84532` | `https://sepolia.base.org` |
+
+## Architecture
+
+The Base adapter is a minimal relayer-side helper located at `chains/base/client/adapter.ts` that:
+
+1. Accepts EVM native transfer requests
+2. Executes transactions using viem wallet client
+3. Waits for transaction confirmation
+4. Returns the transaction hash for sequencer reporting
+
+### Scope
+
+- Supports **native asset transfers only** (no ERC-20 or smart contract calls in MVP)
+- Uses `sendTransaction` for simple ETH transfers
+- Returns real EVM transaction hash for execution reporting
+- Intended for Base Sepolia/Base Mainnet flows
+
+## Payment Relayer Configuration
+
+The Base adapter is used by the payment relayer when configured in `evm` payout mode.
+
+### Environment Variables
+
+```bash
+# Chain configuration
+export RELAYER_CHAIN_REF="eip155:84532"  # or eip155:8453 for mainnet
+export RELAYER_PAYOUT_MODE="evm"         # enables EVM adapter
+
+# Signing key
+export RELAYER_EVM_PRIVATE_KEY="0x..."   # 64 hex characters after 0x
+
+# Optional: sequencer connection
+export SEQUENCER_REPORT_URL="https://sequencer.example.com/v1/executions/report"
+export SEQUENCER_REPORT_SHARED_SECRET="your-secret"
+```
+
+### Noop Mode (Testing)
+
+For local testing without on-chain transactions:
+
+```bash
+export RELAYER_PAYOUT_MODE="noop"
+export RELAYER_CHAIN_REF="eip155:8453"
+```
+
+In noop mode, the relayer accepts requests but doesn't execute real transactions.
+
+## Adapter API
+
+The adapter exports a single function for native transfers:
+
+### `submitEvmNativeTransfer`
+
+```typescript
+import { submitEvmNativeTransfer } from './chains/base/client/adapter';
+
+interface EvmNativeTransferRequest {
+  rpcUrl: string;        // EVM RPC endpoint
+  privateKey: Hex;       // 0x-prefixed private key (64 hex chars)
+  recipient: Address;    // 0x-prefixed recipient address
+  amountWei: bigint;     // Transfer amount in wei
+  chainId?: number;      // Optional chain ID for validation
+}
+
+const result = await submitEvmNativeTransfer({
+  rpcUrl: 'https://sepolia.base.org',
+  privateKey: '0x...',
+  recipient: '0xRecipientAddress',
+  amountWei: 1000000000000n, // 0.000001 ETH
+  chainId: 84532
+});
+
+console.log(result.txHash); // 0x...
+```
+
+### Request Validation
+
+The adapter validates:
+
+- Private key format: Must be `0x` followed by exactly 64 hex characters
+- Transaction receipt status: Throws if transaction reverts
+
+```typescript:chains/base/client/adapter.ts
+function sanitizePrivateKey(raw: string): Hex {
+  const trimmed = raw.trim().replace(/^['"]+|['"]+$/g, '').trim();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(trimmed)) {
+    throw new Error(
+      `invalid private key format (expected 0x + 64 hex chars, len=${trimmed.length})`
+    );
+  }
+  return trimmed.toLowerCase() as Hex;
+}
+```
+
+### Transaction Confirmation
+
+The adapter waits for transaction confirmation and validates success:
+
+```typescript:chains/base/client/adapter.ts
+const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+if (receipt.status !== 'success') {
+  throw new Error(`evm transaction reverted: ${txHash}`);
+}
+```
+
+## Merchant Request Payload
+
+When using the payment relayer, the merchant request body should contain EVM payload fields:
+
+```typescript
+const relayPayload: RelayPayRequestV1 = {
+  authorization: auth.authorization,
+  sequencerSig: auth.sequencerSig,
+  merchantRequest: {
+    url: 'https://merchant.example.com/pay',
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    bodyBase64: Buffer.from(
+      JSON.stringify({
+        rpcUrl: 'https://sepolia.base.org',
+        recipient: '0xRecipientAddress',
+        amountWei: '1000000000000',  // String format for JSON
+        chainId: 84532,
+        privateKey: process.env.BASE_PRIVATE_KEY  // Optional override
+      }),
+      'utf8'
+    ).toString('base64')
+  }
+};
+```
+
+## Example: Base Payment
+
+Complete example from the multi-chain flow:
+
+```typescript:examples/multi-chain-base-solana/run-full-flow.ts
+const baseIntent: IntentV1 = {
+  version: 1,
+  agentId,
+  agentPubKey,
+  signatureScheme: 'ed25519-sha256-v1',
+  agentNonce: '0',
+  amountMicros: '1500000',  // 1.50 USD
+  merchantId: baseMerchantId,
+  requiredChainRef: 'eip155:8453',
+  expiresAt: String(now + 300),
+  requestId: randomHex32()
+};
+
+const baseAuth = await client.authorize({
+  intent: baseIntent,
+  agentSig: signIntent(baseIntent, privateKey)
+});
+
+const baseRelayPayload: RelayPayRequestV1 = {
+  authorization: baseAuth.authorization,
+  sequencerSig: baseAuth.sequencerSig,
+  merchantRequest: {
+    url: baseMerchantUrl,
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    bodyBase64: Buffer.from(
+      JSON.stringify({
+        rpcUrl: 'https://sepolia.base.org',
+        recipient: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
+        amountWei: '1000000000000',
+        chainId: 84532
+      }),
+      'utf8'
+    ).toString('base64')
+  }
+};
+
+const response = await fetch(`${baseRelayerUrl}/v1/relay/pay`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify(baseRelayPayload)
+});
+
+const result = await response.json();
+console.log('Transaction hash:', result.executionTxHash);
+```
+
+## Security Considerations
+
+### Private Key Management
+
+<Warning>
+  Never commit private keys to version control. Use environment variables or secure key management systems.
+</Warning>
+
+```bash
+# Good: Use environment variable
+export RELAYER_EVM_PRIVATE_KEY="0x..."
+
+# Bad: Hardcode in code
+const privateKey = "0x1234..." // NEVER DO THIS
+```
+
+### Key Sanitization
+
+The adapter automatically sanitizes private keys by:
+
+- Trimming whitespace
+- Removing surrounding quotes
+- Validating hex format
+- Converting to lowercase
+
+### Transaction Validation
+
+All transactions are validated for:
+
+- Successful execution (non-reverted)
+- Receipt confirmation on-chain
+- Proper chain ID (if specified)
+
+## Execution Reporting
+
+The relayer automatically reports execution results to the sequencer:
+
+```typescript
+interface ExecutionReport {
+  authId: string;           // Authorization ID
+  chainRef: string;         // "eip155:8453" or "eip155:84532"
+  relayerKeyId: string;     // Relayer identifier
+  executionTxHash: string;  // Real on-chain transaction hash
+  reportedAt: string;       // ISO timestamp
+}
+```
+
+## Testing
+
+### Local Development
+
+For local testing without on-chain transactions:
+
+1. Use `noop` payout mode:
+   ```bash
+   export RELAYER_PAYOUT_MODE="noop"
+   ```
+
+2. Or use a local testnet like Anvil:
+   ```bash
+   anvil
+   export RELAYER_EVM_PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+   export RELAYER_PAYOUT_MODE="evm"
+   ```
+
+### Testnet Usage
+
+For Base Sepolia testing:
+
+1. Get testnet ETH from [Base Sepolia Faucet](https://www.coinbase.com/faucets/base-ethereum-sepolia-faucet)
+2. Configure relayer with testnet settings:
+   ```bash
+   export RELAYER_CHAIN_REF="eip155:84532"
+   export RELAYER_PAYOUT_MODE="evm"
+   export RELAYER_EVM_PRIVATE_KEY="0x..."
+   ```
+
+## Troubleshooting
+
+### "invalid private key format"
+
+Ensure your private key:
+- Starts with `0x`
+- Has exactly 64 hexadecimal characters after `0x`
+- Contains no whitespace or quotes
+
+### "evm transaction reverted"
+
+Common causes:
+- Insufficient balance for gas + transfer amount
+- Invalid recipient address
+- Network congestion or RPC issues
+
+### RPC Connection Issues
+
+If you see connection errors:
+- Verify RPC URL is accessible
+- Check for rate limiting
+- Consider using a dedicated RPC provider (Alchemy, Infura, etc.)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Multi-Chain Overview" icon="network-wired" href="/chains/overview">
+    Learn about the multi-chain architecture
+  </Card>
+  <Card title="Solana Integration" icon="link" href="/chains/solana">
+    Add Solana support to your application
+  </Card>
+</CardGroup>

@@ -1,0 +1,159 @@
+---
+title: 'Report execution'
+api: 'POST /v1/credit/executions'
+description: 'Report the execution of an authorization to the sequencer'
+---
+
+This endpoint allows authorized relayers to report that an authorization has been executed on-chain. The sequencer validates the relayer's signature and updates the authorization status.
+
+## Request body
+
+<ParamField body="authId" type="string" required>
+  32-byte hex identifier of the authorization being executed.
+</ParamField>
+
+<ParamField body="chainRef" type="string" required>
+  Chain reference where execution occurred (must match the authorization's chainRef).
+</ParamField>
+
+<ParamField body="executionTxHash" type="string" required>
+  Transaction hash of the on-chain execution. Can be hex or chain-specific format.
+</ParamField>
+
+<ParamField body="status" type="string" required>
+  Execution status. Either `SUCCESS` or `FAILED`.
+</ParamField>
+
+<ParamField body="reportId" type="string" required>
+  32-byte hex idempotency key for this execution report.
+</ParamField>
+
+<ParamField body="reportedAt" type="string" required>
+  Uint64 Unix timestamp (seconds) when the report was created. Cannot be more than 300 seconds in the future.
+</ParamField>
+
+<ParamField body="relayerKeyId" type="string" required>
+  Identifier of the relayer key used to execute and sign this report.
+</ParamField>
+
+<ParamField body="reportSig" type="string" required>
+  Hex-encoded Ed25519 signature of the execution report by the relayer's private key.
+</ParamField>
+
+## Response
+
+<ResponseField name="ok" type="boolean" required>
+  Always `true` on success.
+</ResponseField>
+
+<ResponseField name="idempotent" type="boolean" required>
+  Whether this report was idempotent (true if the same reportId was used previously with identical data).
+</ResponseField>
+
+## Error codes
+
+| Code | Description |
+|------|-------------|
+| `INVALID_REQUEST` | Malformed request payload or validation error |
+| `NOT_FOUND` | Authorization not found |
+| `UNAUTHORIZED_REPORTER` | Relayer key not found or inactive for the specified chain |
+| `authorization not found` | AuthId doesn't exist |
+| `execution chainRef mismatch` | ChainRef doesn't match authorization |
+| `invalid execution report signature` | Relayer signature verification failed |
+| `reportId already used with different execution payload` | Idempotency key reused with different data |
+| `authorization already reclaimed` | Cannot report execution for a reclaimed authorization |
+| `execution report beyond grace window` | Report submitted after the grace period |
+| `CONFLICT_EXECUTION` | Authorization already executed with a different transaction hash |
+
+<RequestExample>
+
+```bash cURL
+curl --request POST \
+  --url https://sequencer.example.com/v1/credit/executions \
+  --header 'Content-Type: application/json' \
+  --data '{
+  "authId": "0x1122334455667788990011223344556677889900112233445566778899001122",
+  "chainRef": "eip155:8453",
+  "executionTxHash": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+  "status": "SUCCESS",
+  "reportId": "0x9988776655443322119988776655443322119988776655443322119988776655",
+  "reportedAt": "1735689700",
+  "relayerKeyId": "relayer-key-1",
+  "reportSig": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+}'
+```
+
+```javascript JavaScript
+const response = await fetch('https://sequencer.example.com/v1/credit/executions', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    authId: '0x1122334455667788990011223344556677889900112233445566778899001122',
+    chainRef: 'eip155:8453',
+    executionTxHash: '0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+    status: 'SUCCESS',
+    reportId: '0x9988776655443322119988776655443322119988776655443322119988776655',
+    reportedAt: '1735689700',
+    relayerKeyId: 'relayer-key-1',
+    reportSig: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef'
+  })
+});
+
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.post(
+    'https://sequencer.example.com/v1/credit/executions',
+    json={
+        'authId': '0x1122334455667788990011223344556677889900112233445566778899001122',
+        'chainRef': 'eip155:8453',
+        'executionTxHash': '0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+        'status': 'SUCCESS',
+        'reportId': '0x9988776655443322119988776655443322119988776655443322119988776655',
+        'reportedAt': '1735689700',
+        'relayerKeyId': 'relayer-key-1',
+        'reportSig': '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef'
+    }
+)
+
+data = response.json()
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200 Success
+{
+  "ok": true,
+  "idempotent": false
+}
+```
+
+```json 200 Idempotent
+{
+  "ok": true,
+  "idempotent": true
+}
+```
+
+```json 401 Unauthorized relayer
+{
+  "error": "UNAUTHORIZED_REPORTER chainRef=eip155:8453 relayerKeyId=unknown-key",
+  "code": "UNAUTHORIZED_REPORTER"
+}
+```
+
+```json 422 Execution conflict
+{
+  "error": "CONFLICT_EXECUTION for authId",
+  "code": "CONFLICT_EXECUTION"
+}
+```
+
+</ResponseExample>

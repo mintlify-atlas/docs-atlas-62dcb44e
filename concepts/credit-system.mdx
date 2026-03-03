@@ -1,0 +1,510 @@
+---
+title: 'Credit Authorization System'
+description: 'How the sequencer manages balances, nonces, and authorization invariants'
+---
+
+## Overview
+
+The credit system is the core of Shielded x402's fast multi-chain payment execution. Instead of waiting for on-chain confirmations, agents receive instant authorizations from a trusted sequencer, which enforces strict balance and nonce invariants.
+
+## Core Concepts
+
+### Agent Accounts
+
+Each agent is identified by a unique `agentId` (typically derived from their public key). The sequencer maintains:
+
+- **Balance** - Current available credit in micros (1 micro = 0.000001 units)
+- **Nonce** - Strictly increasing counter for replay protection
+- **Public key** - For signature verification
+- **Signature scheme** - e.g., `ed25519-sha256-v1`
+
+**Database schema (simplified):**
+
+```sql
+CREATE TABLE agents (
+  agent_id TEXT PRIMARY KEY,
+  agent_pub_key TEXT NOT NULL,
+  signature_scheme TEXT NOT NULL,
+  balance_micros BIGINT NOT NULL DEFAULT 0,
+  nonce BIGINT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+### Authorization Lifecycle
+
+An authorization represents a commitment by the sequencer to allow a specific payment:
+
+```typescript
+interface AuthorizationV1 {
+  authId: string;           // Unique ID for this authorization
+  intent: IntentV1;         // Original agent intent
+  issuedAt: string;         // Unix timestamp
+  sequencerKeyId: string;   // Which sequencer key signed this
+  sequencerSig: string;     // Ed25519 signature over canonical bytes
+}
+```
+
+**Status progression:**
+
+1. **ISSUED** - Sequencer has authorized but relayer has not executed
+2. **EXECUTED** - Relayer has executed and reported success
+3. **RECLAIMED** - Authorization expired and amount was refunded
+
+## Protocol Invariants
+
+The sequencer enforces two critical invariants for each `agentId`:
+
+### Invariant 1: Strictly Increasing Nonces
+
+<Note>
+**Rule:** Accepted authorizations must have strictly increasing `agentNonce` values.
+
+For example, if the current nonce is `5`, the next authorization must use nonce `6`. Nonce `7` or nonce `5` (replay) will be rejected.
+</Note>
+
+This provides:
+- **Replay protection** - Old authorizations cannot be reused
+- **Ordering** - Clear sequence of agent actions
+- **Concurrency control** - Prevents race conditions in multi-client scenarios
+
+**Implementation:**
+
+```typescript
+// Sequencer validation logic
+if (intent.agentNonce !== currentNonce + 1) {
+  throw new Error(
+    `Invalid nonce: expected ${currentNonce + 1}, got ${intent.agentNonce}`
+  );
+}
+
+// After successful authorization
+await db.query(
+  'UPDATE agents SET nonce = nonce + 1 WHERE agent_id = $1',
+  [intent.agentId]
+);
+```
+
+### Invariant 2: Balance Sufficiency
+
+<Warning>
+**Rule:** Cumulative accepted debits must never exceed cumulative credited balance.
+
+Each authorization reserves funds. The sequencer checks that `balance >= amountMicros` before issuing the authorization.
+</Warning>
+
+**Implementation:**
+
+```typescript
+// Sequencer validation logic
+if (currentBalance < intent.amountMicros) {
+  throw new Error(
+    `Insufficient balance: have ${currentBalance}, need ${intent.amountMicros}`
+  );
+}
+
+// Reserve funds (deduct from balance)
+await db.query(
+  'UPDATE agents SET balance_micros = balance_micros - $1 WHERE agent_id = $2',
+  [intent.amountMicros, intent.agentId]
+);
+```
+
+<Info>
+When an authorization is issued, funds are **immediately deducted** from the balance. If the authorization expires without execution, the reclaim process refunds the amount.
+</Info>
+
+## Intent Structure
+
+Before receiving an authorization, agents construct and sign an intent:
+
+```typescript
+interface IntentV1 {
+  agentId: string;          // Agent's unique identifier
+  agentNonce: string;       // Strictly increasing nonce
+  merchantId: string;       // Derived from service registry ID + URL
+  amountMicros: string;     // Payment amount in micros
+  chainRef: string;         // CAIP-2 chain reference (e.g., "eip155:8453")
+  expiresAt: string;        // Unix timestamp expiration
+  createdAt: string;        // Unix timestamp creation
+}
+```
+
+### Merchant ID Derivation
+
+Merchant IDs are deterministically derived to prevent spoofing:
+
+<Steps>
+  <Step title="Parse URL">
+    Parse the merchant endpoint URL into components.
+  </Step>
+  
+  <Step title="Normalize">
+    - Require `https` scheme
+    - Lowercase the hostname
+    - Remove default port `443`
+    - Remove trailing slash except root `/`
+    - Strip query parameters and fragments
+  </Step>
+  
+  <Step title="Hash">
+    Compute `SHA256(service_registry_id || normalized_url)`
+    
+    Example:
+    ```
+    service_registry_id = "demo/base"
+    normalized_url = "https://merchant.base.example/pay"
+    merchantId = sha256("demo/base" + "https://merchant.base.example/pay")
+    ```
+  </Step>
+</Steps>
+
+This ensures that merchants cannot impersonate each other by using different URLs that resolve to the same endpoint.
+
+## Sequencer Authorization API
+
+### POST /v1/credit/authorize
+
+Request an authorization for a payment:
+
+**Request:**
+
+```json
+{
+  "intent": {
+    "agentId": "0x1234...",
+    "agentNonce": "7",
+    "merchantId": "0xabcd...",
+    "amountMicros": "1500000",
+    "chainRef": "eip155:8453",
+    "expiresAt": "1735689600",
+    "createdAt": "1735686000"
+  },
+  "agentPubKey": "0x5678...",
+  "signatureScheme": "ed25519-sha256-v1",
+  "agentSig": "0x9abc..."
+}
+```
+
+**Validation steps:**
+
+1. **Signature verification** - Verify `agentSig` over canonical intent bytes
+2. **Nonce check** - Ensure `agentNonce === currentNonce + 1`
+3. **Balance check** - Ensure `balance >= amountMicros`
+4. **Chain support** - Verify `chainRef` is in supported chains list
+5. **Expiration** - Check `expiresAt` is reasonable (future but not too far)
+
+**Response:**
+
+```json
+{
+  "authorization": {
+    "authId": "0xdef0...",
+    "intent": { /* original intent */ },
+    "issuedAt": "1735686001",
+    "sequencerKeyId": "seq-key-1",
+    "sequencerSig": "0xfed1..."
+  },
+  "state": {
+    "balance": "3500000",
+    "nonce": "7"
+  }
+}
+```
+
+<Tip>
+The `state` object in the response shows the agent's updated balance and nonce after this authorization. Agents should use this to construct the next intent.
+</Tip>
+
+## Execution Reporting
+
+### POST /v1/credit/executions
+
+Relayers report execution outcomes back to the sequencer:
+
+**Request:**
+
+```json
+{
+  "authId": "0xdef0...",
+  "chainRef": "eip155:8453",
+  "executionTxHash": "0x1234567890abcdef...",
+  "status": "EXECUTED",
+  "reportId": "0xabcd...",
+  "reportedAt": "1735686005",
+  "relayerKeyId": "rel-base-1",
+  "reportSig": "0x7890..."
+}
+```
+
+**Validation steps:**
+
+1. **Relayer signature** - Verify `reportSig` against registered relayer public key
+2. **Chain matching** - Ensure `(chainRef, relayerKeyId)` exists in `relayer_keys` table
+3. **Authorization exists** - Check `authId` corresponds to an `ISSUED` authorization
+4. **Idempotency** - Reject duplicate reports for the same `authId`
+
+**State update:**
+
+```sql
+-- Update authorization status
+UPDATE authorizations
+SET status = 'EXECUTED', executed_at = NOW()
+WHERE auth_id = $1 AND status = 'ISSUED';
+
+-- Insert execution record
+INSERT INTO executions (auth_id, execution_tx_hash, reported_at, relayer_key_id)
+VALUES ($1, $2, $3, $4);
+```
+
+<Warning>
+**Important:** Funds are NOT refunded on execution. The amount was deducted when the authorization was issued. Execution simply marks the authorization as complete.
+</Warning>
+
+## Reclaim Process
+
+### POST /v1/credit/reclaim
+
+If an authorization expires without being executed, the agent or sequencer can reclaim the reserved funds:
+
+**Request:**
+
+```json
+{
+  "authId": "0xdef0...",
+  "callerType": "agent",
+  "requestedAt": "1735690000"
+}
+```
+
+**Preconditions:**
+
+1. Authorization must be in `ISSUED` status
+2. Current time must be after `expiresAt`
+3. One-time transition (cannot reclaim twice)
+
+**State update:**
+
+```sql
+-- Refund balance
+UPDATE agents
+SET balance_micros = balance_micros + (
+  SELECT amount_micros FROM authorizations WHERE auth_id = $1
+)
+WHERE agent_id = (
+  SELECT agent_id FROM authorizations WHERE auth_id = $1
+);
+
+-- Mark as reclaimed
+UPDATE authorizations
+SET status = 'RECLAIMED', reclaimed_at = NOW()
+WHERE auth_id = $1 AND status = 'ISSUED';
+```
+
+<Info>
+**Caller types:**
+- `agent` - The original agent reclaims their own funds
+- `sequencer` - Automated sequencer sweeper reclaims expired authorizations
+
+Both have the same effect, but are tracked separately for auditability.
+</Info>
+
+## Funding Sources
+
+### 1. Shielded Settlement (Production)
+
+The primary funding mechanism is shielded on-chain settlement:
+
+<Steps>
+  <Step title="Agent creates shielded payment">
+    Agent uses `ShieldedClientSDK` to construct a ZK proof spending a shielded note.
+  </Step>
+  
+  <Step title="Settlement on-chain">
+    Payment is settled on-chain, emitting a funding signal.
+  </Step>
+  
+  <Step title="Indexer detects funding">
+    Sequencer or external indexer monitors for funding events.
+  </Step>
+  
+  <Step title="Credit agent balance">
+    Sequencer credits the agent's balance based on the funding signal:
+    
+    ```sql
+    UPDATE agents
+    SET balance_micros = balance_micros + $1
+    WHERE agent_id = $2;
+    ```
+  </Step>
+</Steps>
+
+This preserves privacy: the shielded payment doesn't reveal who is funding which agent account.
+
+### 2. Admin Credit Endpoint (Test Only)
+
+<Warning>
+**Development/testing only:** The `POST /v1/admin/credit` endpoint allows direct balance crediting without shielded settlement. This should NEVER be exposed in production.
+</Warning>
+
+**Request:**
+
+```json
+{
+  "agentId": "0x1234...",
+  "amountMicros": "10000000",
+  "reason": "test funding"
+}
+```
+
+**Headers:**
+
+```
+Authorization: Bearer <SEQUENCER_ADMIN_TOKEN>
+```
+
+This is useful for local development and integration tests where setting up shielded payments would be cumbersome.
+
+## Sequencer Key Management
+
+### Multiple Sequencer Keys
+
+The sequencer can have multiple active signing keys, identified by `sequencerKeyId`:
+
+**Use cases:**
+- **Key rotation** - Issue new authorizations with `seq-key-2` while old ones use `seq-key-1`
+- **Multi-region** - Different sequencer instances in different regions use different keys
+- **Hot/cold storage** - High-value authorizations use cold-stored keys
+
+**Configuration:**
+
+```bash
+SEQUENCER_SIGNING_KEY_ID=seq-key-1
+SEQUENCER_SIGNING_PRIVATE_KEY=0x1234567890abcdef...
+```
+
+### Relayer Key Registry
+
+Relayers must register their public keys with the sequencer to report executions:
+
+**Database schema:**
+
+```sql
+CREATE TABLE relayer_keys (
+  chain_ref TEXT NOT NULL,
+  relayer_key_id TEXT NOT NULL,
+  public_key_hex TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (chain_ref, relayer_key_id)
+);
+```
+
+**Bootstrap configuration:**
+
+```bash
+SEQUENCER_RELAYER_KEYS_JSON='{
+  "solana:devnet": {
+    "rel-sol-1": "0x1234..."
+  },
+  "eip155:84532": {
+    "rel-base-1": "0x5678..."
+  }
+}'
+```
+
+When a relayer reports execution, the sequencer looks up `(chainRef, relayerKeyId)` to find the public key for signature verification.
+
+## Commitment System
+
+The sequencer periodically builds Merkle trees of authorization leaves for auditability.
+
+### Leaf Computation
+
+```typescript
+const authHash = keccak256(canonicalAuthorizationBytes);
+const salt = keccak256(concat([sequencerSecret, authId]));
+const leaf = keccak256(
+  concat([
+    'x402:authleaf:v1',  // domain tag
+    logSeqNo,             // sequential counter
+    prevLeafHash,         // previous leaf (chain)
+    authHash,             // authorization hash
+    salt                  // derived from secret + authId
+  ])
+);
+```
+
+**Key properties:**
+- **Chained** - Each leaf includes `prevLeafHash`, creating a hash chain
+- **Salted** - Salt prevents rainbow table attacks on authorization hashes
+- **Deterministic** - Given `sequencerSecret`, leaf computation is reproducible
+
+### Epoch Building
+
+<Steps>
+  <Step title="Collect authorizations">
+    Every hour (configurable), the sequencer queries all authorizations since the last epoch.
+  </Step>
+  
+  <Step title="Compute leaves">
+    For each authorization in order:
+    - Compute `authHash`
+    - Derive `salt = H(secret || authId)`
+    - Build `leaf` including chain from previous
+  </Step>
+  
+  <Step title="Build Merkle tree">
+    Construct a binary Merkle tree from all leaves and compute the root.
+  </Step>
+  
+  <Step title="Store epoch">
+    Insert epoch record:
+    ```sql
+    INSERT INTO commitment_epochs
+      (epoch_id, root, count, prev_root, sequencer_key_id, built_at)
+    VALUES ($1, $2, $3, $4, $5, NOW());
+    ```
+  </Step>
+  
+  <Step title="Optional: Post to Base">
+    If configured, submit transaction to `CommitmentRegistryV1.postCommitment()`.
+  </Step>
+</Steps>
+
+### Inclusion Proofs
+
+Agents can fetch Merkle proofs via `GET /v1/commitments/proof?authId=0x...`:
+
+**Response:**
+
+```json
+{
+  "epochId": "epoch-1735689600",
+  "leafHash": "0xabcd...",
+  "siblings": [
+    "0x1111...",
+    "0x2222...",
+    "0x3333..."
+  ],
+  "index": 42
+}
+```
+
+Agents can independently verify:
+1. Compute expected leaf from authorization
+2. Hash up the tree using siblings
+3. Compare final hash to on-chain root
+
+This provides **delayed trustless auditability** without requiring real-time on-chain verification.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Shielded Payments" icon="shield-halved" href="/concepts/shielded-payments">
+    Learn how zero-knowledge proofs enable anonymous funding
+  </Card>
+  <Card title="Protocol Flow" icon="diagram-project" href="/concepts/protocol-flow">
+    See how all the pieces fit together end-to-end
+  </Card>
+</CardGroup>

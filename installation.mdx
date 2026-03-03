@@ -1,0 +1,425 @@
+---
+title: Installation
+description: Install Shielded x402 SDKs for client and merchant applications
+---
+
+Shielded x402 provides two main SDK packages:
+
+- `@shielded-x402/client`: For building agents and applications that make payments
+- `@shielded-x402/merchant`: For services that accept x402 payments
+
+Both packages are available on npm and support ESM module resolution.
+
+## Client SDK
+
+The client SDK provides two integration paths:
+
+1. **`ShieldedClientSDK`**: Anonymous proof-backed payment construction using zero-knowledge circuits
+2. **`MultiChainCreditClient`**: Sequencer-authorized fast execution across Base and Solana
+
+### Installation
+
+<CodeGroup>
+
+```bash npm
+npm install @shielded-x402/client
+```
+
+```bash pnpm
+pnpm add @shielded-x402/client
+```
+
+```bash yarn
+yarn add @shielded-x402/client
+```
+
+```bash bun
+bun add @shielded-x402/client
+```
+
+</CodeGroup>
+
+### Package Details
+
+<Info>
+  **Current version**: 0.4.0  
+  **Module type**: ESM  
+  **TypeScript**: Full type definitions included
+</Info>
+
+The client SDK depends on:
+
+- `@shielded-x402/shared-types` (workspace package)
+- `@shielded-x402/erc8004-adapter` (workspace package)
+- `viem` ^2.39.3 (peer dependency)
+
+### Optional: Zero-Knowledge Proof Support
+
+For production use of `ShieldedClientSDK` with real Noir proofs, install optional peer dependencies:
+
+<CodeGroup>
+
+```bash npm
+npm install @aztec/bb.js @noir-lang/noir_js
+```
+
+```bash pnpm
+pnpm add @aztec/bb.js @noir-lang/noir_js
+```
+
+```bash yarn
+yarn add @aztec/bb.js @noir-lang/noir_js
+```
+
+```bash bun
+bun add @aztec/bb.js @noir-lang/noir_js
+```
+
+</CodeGroup>
+
+<Note>
+  **Proof provider is optional**: The SDK works without these dependencies for testing and noop modes. Install only if you need client-side proof generation.
+</Note>
+
+Peer dependency versions:
+
+- `@aztec/bb.js`: &gt;=2.1.11 &lt;4.0.0
+- `@noir-lang/noir_js`: &gt;=1.0.0-beta.18 &lt;2.0.0
+
+### Basic Usage
+
+Import the SDK components:
+
+```typescript
+import {
+  ShieldedClientSDK,
+  MultiChainCreditClient,
+  createShieldedFetch,
+  LocalNoteIndexer,
+  buildWitnessFromCommitments
+} from '@shielded-x402/client';
+```
+
+#### Multi-Chain Credit Client
+
+For sequencer-authorized payments:
+
+```typescript
+const client = new MultiChainCreditClient({
+  sequencerUrl: 'https://sequencer.shielded.xyz',
+  relayerUrls: {
+    'eip155:8453': 'https://base-relayer.shielded.xyz',
+    'solana:devnet': 'https://solana-relayer.shielded.xyz'
+  },
+  sequencerAdminToken: process.env.SEQUENCER_ADMIN_TOKEN
+});
+
+// Authorize and execute payment
+const result = await client.pay({
+  chainRef: 'eip155:8453',
+  amountMicros: '1500000',  // $1.50 USD
+  merchant: {
+    serviceRegistryId: 'demo/base',
+    endpointUrl: 'https://merchant.example/pay'
+  },
+  merchantRequest: {
+    url: 'https://merchant.example/pay',
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    bodyBase64: Buffer.from(JSON.stringify({ orderId: 'o-123' })).toString('base64')
+  },
+  agent: {
+    agentId: '0x...',
+    agentPubKey: '0x...',
+    signatureScheme: 'ed25519-sha256-v1',
+    agentNonce: '0',
+    signIntent: async ({ canonicalBytes }) => {
+      // Sign with your agent's private key
+      return signEd25519(canonicalBytes);
+    }
+  }
+});
+
+console.log(result.relay.executionTxHash);
+```
+
+#### Shielded Client SDK
+
+For anonymous proof-backed payments:
+
+```typescript
+const sdk = new ShieldedClientSDK({
+  endpoint: 'https://relayer.shielded.xyz',
+  signer: async (message) => account.signMessage({ message })
+});
+
+const noteStore = new LocalNoteIndexer();
+
+const shieldedFetch = createShieldedFetch({
+  sdk,
+  resolveContext: async () => {
+    const note = noteStore.getNotes().find(n => n.amount > 0n);
+    if (!note) throw new Error('no spendable note');
+    
+    const commitments = noteStore.getCommitments();
+    const witness = buildWitnessFromCommitments(commitments, note.leafIndex);
+    const nullifierSecret = getNullifierSecret(note.commitment);
+    
+    return { note, witness, nullifierSecret };
+  }
+});
+
+// Automatic 402 handling
+const res = await shieldedFetch('https://api.example.com/paid/data');
+console.log(await res.text());
+```
+
+## Merchant SDK
+
+The merchant SDK provides utilities for accepting and verifying x402 payments.
+
+### Installation
+
+<CodeGroup>
+
+```bash npm
+npm install @shielded-x402/merchant
+```
+
+```bash pnpm
+pnpm add @shielded-x402/merchant
+```
+
+```bash yarn
+yarn add @shielded-x402/merchant
+```
+
+```bash bun
+bun add @shielded-x402/merchant
+```
+
+</CodeGroup>
+
+### Package Details
+
+<Info>
+  **Current version**: 0.1.0  
+  **Module type**: ESM  
+  **TypeScript**: Full type definitions included
+</Info>
+
+The merchant SDK depends on:
+
+- `@shielded-x402/shared-types` (workspace package)
+- `viem` ^2.39.3 (peer dependency)
+
+### Basic Usage
+
+Import merchant utilities:
+
+```typescript
+import {
+  verifyPaymentSignature,
+  verifySequencerAuthorization,
+  extractPaymentHeaders
+} from '@shielded-x402/merchant';
+```
+
+Example Express.js middleware:
+
+```typescript
+import express from 'express';
+import { verifyPaymentSignature } from '@shielded-x402/merchant';
+
+const app = express();
+
+app.get('/api/protected', async (req, res) => {
+  const authHeader = req.headers['authorization'];
+  const paymentSig = req.headers['x-payment-signature'];
+  
+  if (!paymentSig) {
+    return res.status(402).json({
+      error: 'PAYMENT_REQUIRED',
+      requirement: {
+        amountMicros: '1000000',
+        merchantId: '0x...',
+        chainRef: 'eip155:8453'
+      }
+    });
+  }
+  
+  const isValid = await verifyPaymentSignature({
+    signature: paymentSig,
+    merchantId: '0x...',
+    amountMicros: '1000000',
+    request: req
+  });
+  
+  if (!isValid) {
+    return res.status(403).json({ error: 'INVALID_PAYMENT' });
+  }
+  
+  // Serve protected content
+  res.json({ data: 'Protected resource content' });
+});
+```
+
+## Shared Types
+
+Both SDKs use `@shielded-x402/shared-types` for protocol types. You can import these directly if needed:
+
+```typescript
+import type {
+  IntentV1,
+  AuthorizationV1,
+  PaymentRequirement,
+  ShieldedNote,
+  Hex
+} from '@shielded-x402/shared-types';
+```
+
+<Warning>
+  The shared-types package is a workspace dependency. If you're building outside the monorepo, install the client or merchant SDK—both re-export necessary types.
+</Warning>
+
+## Development Installation
+
+To work with the full Shielded x402 monorepo:
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/your-org/shielded-x402.git
+    cd shielded-x402
+    ```
+  </Step>
+  
+  <Step title="Install dependencies">
+    ```bash
+    pnpm install
+    ```
+    
+    This installs all workspace packages and their dependencies.
+  </Step>
+  
+  <Step title="Install contract dependencies">
+    ```bash
+    pnpm contracts:deps
+    ```
+    
+    Required for Foundry-based Solidity contracts.
+  </Step>
+  
+  <Step title="Build all packages">
+    ```bash
+    pnpm build
+    ```
+    
+    Compiles TypeScript packages in topological order.
+  </Step>
+  
+  <Step title="Run type checking">
+    ```bash
+    pnpm typecheck
+    ```
+    
+    Validates TypeScript across the entire monorepo.
+  </Step>
+</Steps>
+
+### Repository Structure
+
+The monorepo is organized as follows:
+
+```
+shielded-x402/
+├── sdk/
+│   ├── client/           # @shielded-x402/client
+│   └── merchant/         # @shielded-x402/merchant
+├── services/
+│   ├── credit-sequencer/ # Sequencer service
+│   ├── payment-relayer/  # Multi-chain relayer
+│   └── merchant-gateway/ # x402 gateway service
+├── packages/
+│   ├── shared-types/     # Protocol types
+│   └── erc8004-adapter/  # ERC-8004 discovery
+├── contracts/            # Solidity contracts (Foundry)
+├── chains/
+│   ├── base/             # Base EVM adapter
+│   └── solana/           # Solana programs + adapter
+├── circuits/
+│   └── spend_change/     # Noir circuit
+└── examples/             # Runnable integration examples
+```
+
+## Environment Variables
+
+The SDKs accept URLs and tokens via constructor options. For services (sequencer, relayers), configure via environment variables:
+
+### Sequencer Configuration
+
+```bash .env
+DATABASE_URL=postgresql://user:pass@localhost:5432/sequencer
+SEQUENCER_PORT=3200
+SEQUENCER_ADMIN_TOKEN=change-me-in-production
+SEQUENCER_KEY_ID=sequencer-key-1
+SEQUENCER_ED25519_PRIVATE_KEY_PEM=<pem_string>
+```
+
+### Relayer Configuration
+
+```bash .env
+RELAYER_BASE_CHAIN_REF=eip155:8453
+RELAYER_BASE_PAYOUT_MODE=evm  # or 'noop'
+RELAYER_EVM_PRIVATE_KEY=0x...
+RELAYER_SOLANA_PAYOUT_MODE=solana
+SOLANA_RPC_URL=https://api.devnet.solana.com
+SOLANA_GATEWAY_PROGRAM_ID=<program_id>
+```
+
+<Tip>
+  See the [quickstart guide](/quickstart) for a complete environment setup example.
+</Tip>
+
+## Troubleshooting
+
+### Build Errors
+
+If you encounter TypeScript build errors:
+
+```bash
+# Clean all build artifacts
+find . -name 'dist' -type d -exec rm -rf {} +
+
+# Rebuild in dependency order
+pnpm build
+```
+
+### Peer Dependency Warnings
+
+Peer dependency warnings for `@aztec/bb.js` and `@noir-lang/noir_js` are expected if you're not using client-side proof generation. Install them only when needed:
+
+```bash
+pnpm add @aztec/bb.js@^2.1.11 @noir-lang/noir_js@^1.0.0-beta.18
+```
+
+### Viem Version Conflicts
+
+Ensure your project uses `viem` ^2.39.3 or later. The SDK relies on recent viem features for signature verification.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first multi-chain payment in 5 minutes
+  </Card>
+  <Card title="Client SDK Guide" icon="code" href="/client-sdk/overview">
+    Deep dive into MultiChainCreditClient usage
+  </Card>
+  <Card title="Merchant Integration" icon="store" href="/merchant-sdk/integration">
+    Accept x402 payments in your API
+  </Card>
+  <Card title="API Reference" icon="book" href="/api/sequencer/authorize">
+    Explore sequencer and relayer endpoints
+  </Card>
+</CardGroup>

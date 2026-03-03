@@ -1,0 +1,137 @@
+---
+title: "Merchant SDK Overview"
+description: "Accept shielded x402 payments in your application"
+---
+
+## What is the Merchant SDK?
+
+The Merchant SDK enables merchants to accept privacy-preserving x402 payments using zero-knowledge proofs. Customers can pay for API access, services, or content without revealing their identity or payment history.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Zero-Knowledge Proofs" icon="shield-halved">
+    Verify payments without revealing customer identity or transaction history.
+  </Card>
+  <Card title="Challenge-Response" icon="handshake">
+    Issue payment challenges and verify cryptographic proofs in responses.
+  </Card>
+  <Card title="Nullifier Protection" icon="ban">
+    Prevent double-spending with cryptographic nullifiers.
+  </Card>
+  <Card title="On-Chain Settlement" icon="link">
+    Settle verified payments on-chain for cryptographic guarantees.
+  </Card>
+</CardGroup>
+
+## How It Works
+
+The x402 payment flow follows a challenge-response pattern:
+
+<Steps>
+  <Step title="Issue Challenge">
+    Merchant issues a payment requirement with a unique challenge nonce.
+  </Step>
+  <Step title="Client Proves Payment">
+    Client generates a zero-knowledge proof and signs the payment.
+  </Step>
+  <Step title="Verify Payment">
+    Merchant verifies the proof, signature, and nullifier uniqueness.
+  </Step>
+  <Step title="Settle On-Chain">
+    Merchant settles the payment on-chain to consume the nullifier.
+  </Step>
+</Steps>
+
+## Core SDK Class
+
+The `ShieldedMerchantSDK` class provides the main interface for accepting payments:
+
+```typescript
+import { ShieldedMerchantSDK } from '@shielded-x402/merchant';
+import type { MerchantConfig, MerchantHooks } from '@shielded-x402/merchant';
+
+const config: MerchantConfig = {
+  rail: 'shielded-usdc',
+  price: 1000000n, // 1 USDC in micro units
+  merchantPubKey: '0x...',
+  verifyingContract: '0x...',
+  challengeTtlMs: 180000, // 3 minutes
+  network: 'eip155:11155111', // Sepolia
+  asset: '0x0000...0000' // USDC asset identifier
+};
+
+const hooks: MerchantHooks = {
+  verifyProof: async (payload) => {
+    // Verify zero-knowledge proof on-chain or via verifier
+    return true;
+  },
+  isNullifierUsed: async (nullifier) => {
+    // Check if nullifier has been used
+    return false;
+  }
+};
+
+const sdk = new ShieldedMerchantSDK(config, hooks);
+```
+
+## Configuration Reference
+
+### MerchantConfig
+
+<ParamField path="rail" type="string" required>
+  Payment rail identifier. Currently supports `'shielded-usdc'`.
+</ParamField>
+
+<ParamField path="price" type="bigint" required>
+  Price in smallest asset units (e.g., micro-USDC: 1000000n = 1 USDC).
+</ParamField>
+
+<ParamField path="merchantPubKey" type="Hex" required>
+  Merchant's public key for payment verification.
+</ParamField>
+
+<ParamField path="verifyingContract" type="Hex" required>
+  Address of the shielded pool contract that verifies proofs.
+</ParamField>
+
+<ParamField path="challengeTtlMs" type="number" required>
+  Challenge time-to-live in milliseconds (recommended: 180000).
+</ParamField>
+
+<ParamField path="network" type="string">
+  Network identifier (default: `'eip155:11155111'` for Sepolia).
+</ParamField>
+
+<ParamField path="asset" type="Hex">
+  Asset identifier for the payment token.
+</ParamField>
+
+<ParamField path="payTo" type="Hex">
+  Payment recipient address (defaults to `verifyingContract`).
+</ParamField>
+
+<ParamField path="fixedChallengeNonce" type="Hex">
+  Fixed nonce for testing only. Omit for production.
+</ParamField>
+
+### MerchantHooks
+
+<ParamField path="verifyProof" type="(payload: ShieldedPaymentResponse) => Promise<boolean>" required>
+  Hook to verify zero-knowledge proofs. Must check both proof validity and merkle root.
+</ParamField>
+
+<ParamField path="isNullifierUsed" type="(nullifier: Hex) => Promise<boolean>" required>
+  Hook to check if a nullifier has been used. Prevents double-spending.
+</ParamField>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Integration Guide" icon="rocket" href="/merchant-sdk/integration">
+    Integrate x402 payments into your application
+  </Card>
+  <Card title="Payment Verification" icon="check" href="/merchant-sdk/verification">
+    Learn how to verify and settle payments
+  </Card>
+</CardGroup>

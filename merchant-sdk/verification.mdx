@@ -1,0 +1,385 @@
+---
+title: "Payment Verification"
+description: "Verify zero-knowledge payment proofs and settle on-chain"
+---
+
+## Verification Flow
+
+The SDK performs comprehensive verification of shielded payments:
+
+```typescript
+const verification = await sdk.verifyShieldedPayment(paymentSignatureHeader);
+
+if (verification.ok) {
+  // Payment verified successfully
+  const { payload, payerAddress } = verification;
+} else {
+  // Payment failed verification
+  const { reason } = verification;
+}
+```
+
+## Verification Steps
+
+The `verifyShieldedPayment` method performs these checks:
+
+<Steps>
+  <Step title="Header Validation">
+    Validates the `PAYMENT-SIGNATURE` header is present and well-formed.
+    
+    **Failure reason**: `'missing payment headers'` or `'invalid PAYMENT-SIGNATURE header'`
+  </Step>
+  
+  <Step title="Requirement Matching">
+    Ensures the accepted requirement matches merchant configuration:
+    - Rail matches (`'shielded-usdc'`)
+    - Price matches exactly
+    - Merchant public key matches
+    - Verifying contract matches
+    
+    **Failure reason**: `'accepted requirement does not match merchant config'`
+  </Step>
+  
+  <Step title="Challenge Validation">
+    Verifies the challenge nonce is active and not expired.
+    
+    **Failure reasons**: `'unknown challenge nonce'` or `'challenge expired'`
+  </Step>
+  
+  <Step title="Payload Shape Validation">
+    Validates the payment response structure:
+    - Exactly 6 public inputs
+    - Proof hex length within limits (< 262144 bytes)
+    
+    **Failure reason**: Specific validation error message
+  </Step>
+  
+  <Step title="Challenge Hash Verification">
+    Recomputes and verifies the challenge hash:
+    
+    ```typescript
+    const expectedChallengeHash = keccak256(
+      concatHex(
+        challengeHashPreimage(
+          challengeNonce,
+          amount,
+          verifyingContract
+        )
+      )
+    );
+    ```
+    
+    **Failure reason**: `'challenge hash mismatch'`
+  </Step>
+  
+  <Step title="Amount Verification">
+    Extracts amount from `publicInputs[5]` and verifies it matches the price.
+    
+    **Failure reasons**: `'invalid amount encoding'` or `'amount mismatch'`
+  </Step>
+  
+  <Step title="Nullifier Check">
+    Calls `hooks.isNullifierUsed()` to prevent replay attacks.
+    
+    **Failure reason**: `'nullifier already used'`
+  </Step>
+  
+  <Step title="Proof Verification">
+    Calls `hooks.verifyProof()` to verify the zero-knowledge proof on-chain.
+    
+    **Failure reason**: `'proof verification failed'`
+  </Step>
+  
+  <Step title="Signature Recovery">
+    Recovers the payer's address from the payment signature:
+    
+    ```typescript
+    const signedPayload = JSON.stringify(payload);
+    const msgHash = hashMessage(signedPayload);
+    const payer = await recoverAddress({ hash: msgHash, signature });
+    ```
+    
+    **Failure reason**: `'invalid payment signature'`
+  </Step>
+</Steps>
+
+## VerifyResult Type
+
+The verification result has this structure:
+
+```typescript
+interface VerifyResult {
+  ok: boolean;
+  reason?: string;        // Present when ok === false
+  payerAddress?: Hex;     // Present when ok === true
+  payload?: ShieldedPaymentResponse;  // Present when ok === true
+}
+```
+
+### Success Response
+
+```typescript
+{
+  ok: true,
+  payerAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
+  payload: {
+    proof: '0x...',
+    publicInputs: [...],
+    nullifier: '0x...',
+    root: '0x...',
+    merchantCommitment: '0x...',
+    changeCommitment: '0x...',
+    challengeHash: '0x...',
+    encryptedReceipt: '0x...'
+  }
+}
+```
+
+### Failure Response
+
+```typescript
+{
+  ok: false,
+  reason: 'challenge hash mismatch'
+}
+```
+
+## Verifier Adapters
+
+### On-Chain Verifier
+
+The production verifier checks proofs against deployed contracts:
+
+```typescript src/lib/verifier.ts
+import { createOnchainVerifier } from './lib/verifier';
+import type { OnchainVerifierConfig } from './lib/verifier';
+
+const config: OnchainVerifierConfig = {
+  rpcUrl: 'https://sepolia.infura.io/v3/YOUR_KEY',
+  shieldedPoolAddress: '0x...',
+  ultraVerifierAddress: '0x...'
+};
+
+const verifier = createOnchainVerifier(config);
+```
+
+**Implementation details**:
+
+- Calls `isKnownRoot(root)` on the shielded pool contract
+- Calls `verify(proof, publicInputs)` on the ultra verifier contract
+- Calls `isNullifierUsed(nullifier)` to check for double-spending
+
+### Allow-All Verifier (Dev Only)
+
+<Warning>
+  Only use for local development and testing. Never deploy to production.
+</Warning>
+
+```typescript
+import { createAllowAllVerifier } from './lib/verifier';
+
+const verifier = createAllowAllVerifier();
+```
+
+This verifier:
+- Accepts any proof starting with `'0x'`
+- Tracks nullifiers in-memory to prevent double-use within the same session
+- Does not verify cryptographic proofs
+
+## Settlement Adapters
+
+### On-Chain Settlement
+
+Submits payments to the shielded pool contract:
+
+```typescript src/lib/settlement.ts
+import { createOnchainSettlement } from './lib/settlement';
+import type { OnchainSettlementConfig } from './lib/settlement';
+
+const config: OnchainSettlementConfig = {
+  rpcUrl: 'https://sepolia.infura.io/v3/YOUR_KEY',
+  shieldedPoolAddress: '0x...',
+  relayerPrivateKey: process.env.RELAYER_PRIVATE_KEY as `0x${string}`
+};
+
+const settlement = createOnchainSettlement(config);
+```
+
+**Settlement flow**:
+
+<Steps>
+  <Step title="Check nullifier status">
+    Calls `isNullifierUsed(nullifier)` to detect if already settled.
+  </Step>
+  
+  <Step title="Submit spend transaction">
+    Calls `submitSpend(proof, nullifier, root, merchantCommitment, changeCommitment, challengeHash, amount)`.
+  </Step>
+  
+  <Step title="Wait for confirmation">
+    Waits for transaction receipt and checks status.
+  </Step>
+  
+  <Step title="Return result">
+    Returns `{ txHash, alreadySettled: false }` on success.
+  </Step>
+</Steps>
+
+### No-Op Settlement (Dev Only)
+
+<Warning>
+  Only use for testing payment flows without blockchain interaction.
+</Warning>
+
+```typescript
+import { createNoopSettlement } from './lib/settlement';
+
+const settlement = createNoopSettlement();
+```
+
+Always returns `{ alreadySettled: false }` without performing any on-chain action.
+
+## Confirming Settlement
+
+After successful on-chain settlement, update SDK state:
+
+```typescript
+await sdk.confirmSettlement(
+  verification.payload.nullifier,
+  settlement.txHash
+);
+```
+
+This records the settlement transaction hash for the nullifier.
+
+## Withdrawal Support
+
+The SDK can encode withdrawal calldata for contract interactions:
+
+```typescript
+import type { WithdrawRequest } from '@shielded-x402/merchant';
+
+const request: WithdrawRequest = {
+  nullifier: '0xaaaa...',
+  challengeNonce: '0xbbbb...',
+  recipient: '0x...'
+};
+
+const result = await sdk.decryptAndWithdraw(request);
+
+// Result includes encoded calldata
+console.log(result.encodedCallData);
+// '0x...' - ready to submit to contract
+```
+
+### WithdrawResult Type
+
+```typescript
+interface WithdrawResult {
+  nullifier: Hex;
+  challengeNonce: Hex;
+  recipient: Hex;
+  encodedCallData: Hex;  // Encoded withdraw(nullifier, challengeNonce, recipient)
+}
+```
+
+## Error Handling
+
+Handle verification failures gracefully:
+
+```typescript
+const verification = await sdk.verifyShieldedPayment(paymentSignature);
+
+if (!verification.ok) {
+  // Log for debugging
+  console.error('Payment verification failed:', verification.reason);
+  
+  // Return appropriate HTTP status
+  switch (verification.reason) {
+    case 'missing payment headers':
+    case 'invalid PAYMENT-SIGNATURE header':
+      return res.status(402).json({
+        error: 'Payment Required',
+        reason: verification.reason
+      });
+    
+    case 'nullifier already used':
+      return res.status(409).json({
+        error: 'Payment already consumed',
+        reason: verification.reason
+      });
+    
+    case 'challenge expired':
+      return res.status(402).json({
+        error: 'Challenge expired',
+        reason: 'Please request a new challenge'
+      });
+    
+    default:
+      return res.status(402).json({
+        error: 'Invalid payment',
+        reason: verification.reason
+      });
+  }
+}
+```
+
+## Security Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always verify proofs on-chain in production">
+    Use `createOnchainVerifier()` connected to a trusted RPC endpoint. Never use `createAllowAllVerifier()` in production.
+  </Accordion>
+  
+  <Accordion title="Set appropriate challenge TTL">
+    Use a short TTL (2-5 minutes) to minimize the window for challenge reuse attacks. The default of 180000ms (3 minutes) is recommended.
+  </Accordion>
+  
+  <Accordion title="Protect relayer private keys">
+    Store `RELAYER_PRIVATE_KEY` securely using environment variables or secret management. Never commit keys to source control.
+  </Accordion>
+  
+  <Accordion title="Validate nullifiers before settling">
+    Always check `isNullifierUsed()` before attempting on-chain settlement to avoid wasted gas on reverted transactions.
+  </Accordion>
+  
+  <Accordion title="Monitor settlement transactions">
+    Log settlement transaction hashes and monitor for failures. Implement retry logic for transient RPC errors.
+  </Accordion>
+  
+  <Accordion title="Rate limit payment endpoints">
+    Apply rate limiting to prevent DoS attacks via repeated invalid payment attempts.
+  </Accordion>
+</AccordionGroup>
+
+## TypeScript Reference
+
+Key types from `@shielded-x402/merchant`:
+
+```typescript
+import type {
+  MerchantConfig,
+  MerchantHooks,
+  VerifyResult,
+  SettlementRecord,
+  WithdrawRequest,
+  WithdrawResult,
+  ChallengeIssue
+} from '@shielded-x402/merchant';
+```
+
+Key types from `@shielded-x402/shared-types`:
+
+```typescript
+import type {
+  PaymentRequirement,
+  ShieldedPaymentResponse,
+  Hex
+} from '@shielded-x402/shared-types';
+```
+
+## Next Steps
+
+<Card title="Integration Guide" icon="rocket" href="/merchant-sdk/integration">
+  Return to the integration guide for implementation examples
+</Card>

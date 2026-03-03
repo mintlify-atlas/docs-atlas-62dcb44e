@@ -1,0 +1,264 @@
+---
+title: 'Authorize intent'
+api: 'POST /v1/credit/authorize'
+description: 'Request authorization for a payment intent from the sequencer'
+---
+
+This endpoint validates and authorizes a payment intent, creating an authorization that can be executed by a relayer. The sequencer verifies the agent's signature, checks their balance, and returns a signed authorization if successful.
+
+## Request body
+
+<ParamField body="intent" type="object" required>
+  The payment intent to authorize.
+
+  <Expandable title="properties">
+    <ParamField body="intent.version" type="number" required>
+      Intent version. Must be `1`.
+    </ParamField>
+
+    <ParamField body="intent.agentId" type="string" required>
+      32-byte hex identifier of the agent (derived from public key).
+    </ParamField>
+
+    <ParamField body="intent.agentPubKey" type="string" required>
+      Agent's public key as hex. For EIP-712, this is the Ethereum address. For Ed25519, this is the raw public key.
+    </ParamField>
+
+    <ParamField body="intent.signatureScheme" type="string" required>
+      Signature scheme used. Either `eip712-secp256k1` or `ed25519-sha256-v1`.
+    </ParamField>
+
+    <ParamField body="intent.agentNonce" type="string" required>
+      Uint64 string representing the agent's current nonce. Must match the sequencer's expected nonce.
+    </ParamField>
+
+    <ParamField body="intent.amountMicros" type="string" required>
+      Uint64 string representing payment amount in micros (1/1,000,000 of a unit). Must be greater than 0.
+    </ParamField>
+
+    <ParamField body="intent.merchantId" type="string" required>
+      32-byte hex identifier of the merchant receiving the payment.
+    </ParamField>
+
+    <ParamField body="intent.requiredChainRef" type="string" required>
+      Chain reference for execution (e.g., `eip155:8453` for Base or `solana:devnet`).
+    </ParamField>
+
+    <ParamField body="intent.expiresAt" type="string" required>
+      Uint64 Unix timestamp (seconds) when the intent expires.
+    </ParamField>
+
+    <ParamField body="intent.requestId" type="string" required>
+      32-byte hex idempotency key. Using the same requestId with a different intent will fail.
+    </ParamField>
+
+    <ParamField body="intent.serviceHash" type="string">
+      Optional 32-byte hex hash for service-specific metadata.
+    </ParamField>
+
+    <ParamField body="intent.memoHash" type="string">
+      Optional 32-byte hex hash for memo/note data.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="agentSig" type="string" required>
+  Hex-encoded signature of the intent by the agent's private key.
+</ParamField>
+
+## Response
+
+<ResponseField name="authorization" type="object" required>
+  The signed authorization object.
+
+  <Expandable title="properties">
+    <ResponseField name="version" type="number">
+      Authorization version (always `1`).
+    </ResponseField>
+
+    <ResponseField name="intentId" type="string">
+      32-byte hex hash of the intent.
+    </ResponseField>
+
+    <ResponseField name="authId" type="string">
+      32-byte hex unique identifier for this authorization.
+    </ResponseField>
+
+    <ResponseField name="authorizedAmountMicros" type="string">
+      Uint64 string of authorized amount in micros.
+    </ResponseField>
+
+    <ResponseField name="agentId" type="string">
+      32-byte hex agent identifier.
+    </ResponseField>
+
+    <ResponseField name="agentNonce" type="string">
+      Uint64 string of the agent nonce used.
+    </ResponseField>
+
+    <ResponseField name="merchantId" type="string">
+      32-byte hex merchant identifier.
+    </ResponseField>
+
+    <ResponseField name="chainRef" type="string">
+      Chain reference for execution.
+    </ResponseField>
+
+    <ResponseField name="issuedAt" type="string">
+      Uint64 Unix timestamp when authorization was issued.
+    </ResponseField>
+
+    <ResponseField name="expiresAt" type="string">
+      Uint64 Unix timestamp when authorization expires.
+    </ResponseField>
+
+    <ResponseField name="sequencerEpochHint" type="string">
+      Uint64 epoch identifier hint for commitment tracking.
+    </ResponseField>
+
+    <ResponseField name="logSeqNo" type="string">
+      Uint64 sequence number in the sequencer's append-only log.
+    </ResponseField>
+
+    <ResponseField name="sequencerKeyId" type="string">
+      Identifier of the sequencer key used to sign.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="sequencerSig" type="string" required>
+  Hex-encoded Ed25519 signature of the authorization by the sequencer.
+</ResponseField>
+
+<ResponseField name="idempotent" type="boolean" required>
+  Whether this response is idempotent (true if requestId was previously used with the same intent).
+</ResponseField>
+
+## Error codes
+
+| Code | Description |
+|------|-------------|
+| `INVALID_REQUEST` | Malformed request payload or validation error |
+| `intent expired` | Intent's `expiresAt` timestamp has passed |
+| `unsupported requiredChainRef` | Chain reference not supported by sequencer |
+| `invalid agent signature` | Agent signature verification failed |
+| `agentId does not match agentPubKey` | Agent ID doesn't match the derived ID from public key |
+| `requestId already used for a different intent` | Idempotency key reused with different intent |
+| `invalid agent nonce` | Nonce doesn't match expected value |
+| `insufficient sequencer balance` | Agent's balance is insufficient for the payment |
+
+<RequestExample>
+
+```bash cURL
+curl --request POST \
+  --url https://sequencer.example.com/v1/credit/authorize \
+  --header 'Content-Type: application/json' \
+  --data '{
+  "intent": {
+    "version": 1,
+    "agentId": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+    "agentPubKey": "0xabcdef1234567890abcdef1234567890abcdef12",
+    "signatureScheme": "eip712-secp256k1",
+    "agentNonce": "0",
+    "amountMicros": "1000000",
+    "merchantId": "0xfedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321",
+    "requiredChainRef": "eip155:8453",
+    "expiresAt": "1735689600",
+    "requestId": "0x9999888877776666555544443333222211110000aaaabbbbccccddddeeeeffff"
+  },
+  "agentSig": "0x123456789abcdef..."
+}'
+```
+
+```javascript JavaScript
+const response = await fetch('https://sequencer.example.com/v1/credit/authorize', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    intent: {
+      version: 1,
+      agentId: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+      agentPubKey: '0xabcdef1234567890abcdef1234567890abcdef12',
+      signatureScheme: 'eip712-secp256k1',
+      agentNonce: '0',
+      amountMicros: '1000000',
+      merchantId: '0xfedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321',
+      requiredChainRef: 'eip155:8453',
+      expiresAt: '1735689600',
+      requestId: '0x9999888877776666555544443333222211110000aaaabbbbccccddddeeeeffff'
+    },
+    agentSig: '0x123456789abcdef...'
+  })
+});
+
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.post(
+    'https://sequencer.example.com/v1/credit/authorize',
+    json={
+        'intent': {
+            'version': 1,
+            'agentId': '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+            'agentPubKey': '0xabcdef1234567890abcdef1234567890abcdef12',
+            'signatureScheme': 'eip712-secp256k1',
+            'agentNonce': '0',
+            'amountMicros': '1000000',
+            'merchantId': '0xfedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321',
+            'requiredChainRef': 'eip155:8453',
+            'expiresAt': '1735689600',
+            'requestId': '0x9999888877776666555544443333222211110000aaaabbbbccccddddeeeeffff'
+        },
+        'agentSig': '0x123456789abcdef...'
+    }
+)
+
+data = response.json()
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200 Success
+{
+  "authorization": {
+    "version": 1,
+    "intentId": "0xaabbccdd11223344556677889900aabbccdd11223344556677889900aabbccdd",
+    "authId": "0x1122334455667788990011223344556677889900112233445566778899001122",
+    "authorizedAmountMicros": "1000000",
+    "agentId": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+    "agentNonce": "0",
+    "merchantId": "0xfedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321",
+    "chainRef": "eip155:8453",
+    "issuedAt": "1735689000",
+    "expiresAt": "1735689600",
+    "sequencerEpochHint": "1",
+    "logSeqNo": "42",
+    "sequencerKeyId": "seq-key-1"
+  },
+  "sequencerSig": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+  "idempotent": false
+}
+```
+
+```json 422 Validation error
+{
+  "error": "insufficient sequencer balance",
+  "code": "INVALID_REQUEST"
+}
+```
+
+```json 422 Expired intent
+{
+  "error": "intent expired",
+  "code": "INVALID_REQUEST"
+}
+```
+
+</ResponseExample>

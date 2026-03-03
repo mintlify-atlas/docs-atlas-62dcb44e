@@ -1,0 +1,160 @@
+---
+title: 'Reclaim authorization'
+api: 'POST /v1/credit/reclaim'
+description: 'Reclaim an expired authorization to return funds to the agent balance'
+---
+
+This endpoint allows agents or the sequencer to reclaim expired authorizations that were never executed. When reclaimed, the authorized amount is returned to the agent's available balance.
+
+## Request body
+
+<ParamField body="authId" type="string" required>
+  32-byte hex identifier of the authorization to reclaim.
+</ParamField>
+
+<ParamField body="callerType" type="string" required>
+  Type of caller making the reclaim request. Either `agent` or `sequencer`.
+</ParamField>
+
+<ParamField body="requestedAt" type="string" required>
+  Uint64 Unix timestamp (seconds) when the reclaim was requested. Cannot be more than 300 seconds in the future.
+</ParamField>
+
+<ParamField body="agentId" type="string">
+  32-byte hex agent identifier. Required when callerType is `agent`.
+</ParamField>
+
+<ParamField body="agentSig" type="string">
+  Hex-encoded signature of the reclaim request by the agent. Required when callerType is `agent`.
+</ParamField>
+
+## Headers
+
+<ParamField header="x-sequencer-admin-token" type="string">
+  Admin token for sequencer-initiated reclaims. Required when callerType is `sequencer`.
+</ParamField>
+
+## Response
+
+<ResponseField name="ok" type="boolean" required>
+  Always `true` on success.
+</ResponseField>
+
+<ResponseField name="authId" type="string" required>
+  32-byte hex identifier of the reclaimed authorization.
+</ResponseField>
+
+## Error codes
+
+| Code | Description |
+|------|-------------|
+| `INVALID_REQUEST` | Malformed request payload or validation error |
+| `NOT_FOUND` | Authorization not found |
+| `authorization not found` | AuthId doesn't exist |
+| `unauthorized sequencer reclaim caller` | Invalid or missing admin token for sequencer reclaim |
+| `agentId and agentSig are required for agent reclaim` | Missing required fields for agent reclaim |
+| `agent reclaim caller mismatch` | AgentId doesn't match the authorization's agent |
+| `agent signing metadata missing` | Agent hasn't made any authorizations yet (no signature metadata stored) |
+| `invalid agent reclaim signature` | Agent signature verification failed |
+| `only ISSUED authorizations can be reclaimed` | Authorization status is not ISSUED (may be EXECUTED or already RECLAIMED) |
+| `authorization not yet expired` | Cannot reclaim before the authorization's expiresAt timestamp |
+| `authorization already reclaimed` | Authorization was already reclaimed |
+| `INVARIANT_VIOLATION outstanding balance lower than reclaim amount` | Internal accounting error |
+
+<RequestExample>
+
+```bash cURL (agent reclaim)
+curl --request POST \
+  --url https://sequencer.example.com/v1/credit/reclaim \
+  --header 'Content-Type: application/json' \
+  --data '{
+  "authId": "0x1122334455667788990011223344556677889900112233445566778899001122",
+  "callerType": "agent",
+  "requestedAt": "1735690000",
+  "agentId": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+  "agentSig": "0x9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba"
+}'
+```
+
+```bash cURL (sequencer reclaim)
+curl --request POST \
+  --url https://sequencer.example.com/v1/credit/reclaim \
+  --header 'Content-Type: application/json' \
+  --header 'x-sequencer-admin-token: your-admin-token' \
+  --data '{
+  "authId": "0x1122334455667788990011223344556677889900112233445566778899001122",
+  "callerType": "sequencer",
+  "requestedAt": "1735690000"
+}'
+```
+
+```javascript JavaScript
+// Agent reclaim
+const response = await fetch('https://sequencer.example.com/v1/credit/reclaim', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    authId: '0x1122334455667788990011223344556677889900112233445566778899001122',
+    callerType: 'agent',
+    requestedAt: '1735690000',
+    agentId: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+    agentSig: '0x9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba'
+  })
+});
+
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+# Agent reclaim
+response = requests.post(
+    'https://sequencer.example.com/v1/credit/reclaim',
+    json={
+        'authId': '0x1122334455667788990011223344556677889900112233445566778899001122',
+        'callerType': 'agent',
+        'requestedAt': '1735690000',
+        'agentId': '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+        'agentSig': '0x9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba'
+    }
+)
+
+data = response.json()
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200 Success
+{
+  "ok": true,
+  "authId": "0x1122334455667788990011223344556677889900112233445566778899001122"
+}
+```
+
+```json 422 Not yet expired
+{
+  "error": "authorization not yet expired",
+  "code": "INVALID_REQUEST"
+}
+```
+
+```json 422 Already reclaimed
+{
+  "error": "authorization already reclaimed",
+  "code": "INVALID_REQUEST"
+}
+```
+
+```json 422 Wrong status
+{
+  "error": "only ISSUED authorizations can be reclaimed",
+  "code": "INVALID_REQUEST"
+}
+```
+
+</ResponseExample>

@@ -1,0 +1,439 @@
+---
+title: Migration Guide
+description: Guide for migrating between Shielded x402 versions
+---
+
+This guide helps you migrate your Shielded x402 integration when upgrading between versions.
+
+## Overview
+
+Shielded x402 follows semantic versioning. Breaking changes are introduced in major and minor versions, with migration paths documented here.
+
+<Warning>
+  **Legacy Credit Channel:** The `/v1/relay/credit/*` endpoints have been completely removed. No backward compatibility is retained. All integrations must migrate to the sequencer/relayer architecture.
+</Warning>
+
+## Version History
+
+### v0.3.0 (2026-02-16) - Privacy Hardening
+
+Major privacy improvements with breaking changes to wallet state and SDK APIs.
+
+#### Breaking Changes
+
+<AccordionGroup>
+  <Accordion title="Wallet state schema change">
+    **What changed:**
+    - `wallet-state.json` schema bumped from version `1` to version `2`
+    - Version `1` wallet state files are **intentionally unsupported**
+    
+    **Migration required:**
+    - Existing wallet state files must be recreated/reseeded
+    - No automatic migration path available
+    
+    **Why this changed:**
+    Privacy hardening required fundamental changes to how nullifier secrets are stored and managed per-note.
+  </Accordion>
+  
+  <Accordion title="Nullifier secret handling">
+    **What changed:**
+    - SDK payment APIs now require explicit `nullifierSecret` parameter
+    - Removed `payerPkHash` naming from context and method signatures
+    - `FileBackedWalletState` now persists note-specific `nullifierSecret` values
+    
+    **Old API:**
+    ```typescript
+    // v0.2.x - used payerPkHash
+    const prepared = await sdk.prepare402Payment(
+      requirement,
+      note,
+      witness
+      // No nullifierSecret parameter
+    );
+    ```
+    
+    **New API:**
+    ```typescript
+    // v0.3.0+ - requires explicit nullifierSecret
+    const prepared = await sdk.prepare402Payment(
+      requirement,
+      note,
+      witness,
+      nullifierSecret  // Now required
+    );
+    ```
+    
+    **Migration steps:**
+    <Steps>
+      <Step title="Update SDK calls">
+        Add explicit `nullifierSecret` parameter to all `prepare402Payment` calls.
+      </Step>
+      
+      <Step title="Update wallet state management">
+        Ensure your wallet state persistence stores `nullifierSecret` per note:
+        ```typescript
+        interface NoteWithSecret {
+          note: ShieldedNote;
+          nullifierSecret: Hex;
+          leafIndex: number;
+        }
+        ```
+      </Step>
+      
+      <Step title="Update environment variables">
+        Replace any `PAYER_PK_HASH` environment variables with `NULLIFIER_SECRET`.
+      </Step>
+    </Steps>
+  </Accordion>
+  
+  <Accordion title="Change note handling">
+    **What changed:**
+    - Relayer settlement now carries `changeNullifierSecret`
+    - Change notes are immediately reusable without external secret derivation
+    
+    **Impact:**
+    Improved UX - change notes can be spent immediately in subsequent payments.
+    
+    **Migration:**
+    No code changes required if using `FileBackedWalletState`. If you have custom wallet state management, ensure you handle `changeNullifierSecret` from settlement responses.
+  </Accordion>
+</AccordionGroup>
+
+#### What to Update
+
+<CodeGroup>
+```typescript Before (v0.2.x)
+import { ShieldedClientSDK } from '@shielded-x402/client';
+
+const sdk = new ShieldedClientSDK({ /* ... */ });
+
+// Old: no nullifierSecret parameter
+const prepared = await sdk.prepare402Payment(
+  requirement,
+  note,
+  witness
+);
+```
+
+```typescript After (v0.3.0+)
+import { ShieldedClientSDK } from '@shielded-x402/client';
+
+const sdk = new ShieldedClientSDK({ /* ... */ });
+
+// New: explicit nullifierSecret required
+const nullifierSecret = getNullifierSecretForNote(note);
+const prepared = await sdk.prepare402Payment(
+  requirement,
+  note,
+  witness,
+  nullifierSecret
+);
+```
+</CodeGroup>
+
+#### Fixed Issues
+
+- Client unit tests now use explicit independent nullifier-secret fixtures instead of reusing `note.pkHash`
+
+### v0.2.4 (2026-02-16) - Relayer Bridge Fixes
+
+Bug fixes for relayer payout provider integration.
+
+#### Changes
+
+<Steps>
+  <Step title="Payout provider bridge improvements">
+    Fixed provider-specific x402 header/network transformations while preserving normalized x402 requirement semantics.
+  </Step>
+  
+  <Step title="402 JSON body parsing">
+    Added fallback parsing for 402 JSON bodies that omit the `PAYMENT-REQUIRED` header in both:
+    - Relayed client flow
+    - Relayer challenge fetcher
+  </Step>
+  
+  <Step title="TypeScript strictness">
+    - Improved hosted x402 provider adapter matching
+    - Safer optional context typing under `exactOptionalPropertyTypes`
+    - Tightened `relayerFetch` test typings
+  </Step>
+</Steps>
+
+#### Migration
+
+<Note>
+  This is a patch release with no breaking changes. Update dependencies:
+  ```bash
+  pnpm update @shielded-x402/shared-types@0.2.4
+  pnpm update @shielded-x402/client@0.2.4
+  ```
+</Note>
+
+### v0.2.2 (2026-02-15) - Circuit Build Fix
+
+Fixed stale circuit artifact publishing.
+
+#### Changes
+
+- `@shielded-x402/client` build now always refreshes `dist/circuits/spend_change.json`
+- Prevents stale published circuit ABI (32-depth) from drifting against runtime Merkle depth (24)
+- Package build cleans `dist` before emit for deterministic artifacts
+
+#### Migration
+
+<Note>
+  No code changes required. Update to latest patch:
+  ```bash
+  pnpm update @shielded-x402/shared-types@0.2.2
+  pnpm update @shielded-x402/client@0.2.2
+  ```
+</Note>
+
+### v0.2.1 (2026-02-15) - Relayer Bridge Types
+
+Added missing relayer bridge types to published package.
+
+#### Changes
+
+<Steps>
+  <Step title="Published types">
+    Added to `@shielded-x402/shared-types`:
+    - `parsePaymentRequiredEnvelope`
+    - `RELAYER_ROUTES.challenge`
+    - `RelayerChallengeRequest` / `RelayerChallengeResponse`
+    - Binary-safe relay payload fields (`bodyBase64`)
+  </Step>
+  
+  <Step title="Workspace dependency fix">
+    `@shielded-x402/client` now depends on `@shielded-x402/shared-types` via `workspace:^0.2.1` for correct monorepo linking and publish-time semver resolution.
+  </Step>
+  
+  <Step title="TypeScript config fix">
+    `sdk/client` TypeScript config now resolves workspace shared-types APIs correctly during local builds.
+  </Step>
+</Steps>
+
+#### Migration
+
+<Note>
+  Update dependencies:
+  ```bash
+  pnpm update @shielded-x402/shared-types@0.2.1
+  pnpm update @shielded-x402/client@0.2.1
+  ```
+</Note>
+
+## Migrating from Legacy Credit Channel
+
+If you're using the old `/v1/relay/credit/*` endpoints, you must migrate to the sequencer/relayer architecture.
+
+### Architecture Changes
+
+<AccordionGroup>
+  <Accordion title="Old: Direct credit channel">
+    Legacy flow:
+    1. Agent → Relayer: Issue credit
+    2. Relayer: Track credit internally
+    3. Agent → Relayer: Spend credit
+    4. Relayer: Execute payment
+    
+    **Problems:**
+    - No cross-chain credit sharing
+    - No independent auditability
+    - Relayer must track all state
+  </Accordion>
+  
+  <Accordion title="New: Sequencer-authorized flow">
+    Current flow:
+    1. Agent → Sequencer: Authorize payment intent
+    2. Sequencer: Validate nonce/balance, issue authorization
+    3. Agent → Relayer: Submit authorization + merchant request
+    4. Relayer: Execute payment, report back to sequencer
+    5. Sequencer: Record execution, update state
+    
+    **Benefits:**
+    - Single credit balance across all chains
+    - Sequencer is authoritative for nonce/balance
+    - Per-chain relayers are stateless executors
+    - Periodic commitment roots for delayed audit
+  </Accordion>
+</AccordionGroup>
+
+### Migration Steps
+
+<Steps>
+  <Step title="Update dependencies">
+    Install latest SDK versions:
+    ```bash
+    pnpm update @shielded-x402/client@latest
+    pnpm update @shielded-x402/shared-types@latest
+    ```
+  </Step>
+  
+  <Step title="Deploy sequencer">
+    Set up the credit sequencer service:
+    ```bash
+    # Configure sequencer environment
+    export SEQUENCER_PORT=3200
+    export SEQUENCER_DATABASE_URL=postgresql://...
+    export SEQUENCER_ADMIN_TOKEN=your-admin-token
+    
+    # Start sequencer
+    pnpm --filter @shielded-x402/credit-sequencer start
+    ```
+    See [Sequencer documentation](/infrastructure/sequencer) for details.
+  </Step>
+  
+  <Step title="Update relayer configuration">
+    Configure relayers for specific chains:
+    ```bash
+    # Base relayer
+    export RELAYER_CHAIN_REF=eip155:8453
+    export RELAYER_PAYOUT_MODE=evm
+    export SEQUENCER_URL=http://localhost:3200
+    
+    # Solana relayer
+    export RELAYER_CHAIN_REF=solana:devnet
+    export RELAYER_PAYOUT_MODE=solana
+    export SEQUENCER_URL=http://localhost:3200
+    ```
+  </Step>
+  
+  <Step title="Migrate client code">
+    Replace direct relayer calls with sequencer flow:
+    
+    <CodeGroup>
+    ```typescript Old (Legacy)
+    // Old: direct credit channel
+    const response = await fetch(`${relayerUrl}/v1/relay/credit/spend`, {
+      method: 'POST',
+      body: JSON.stringify({
+        creditId,
+        amount,
+        merchant
+      })
+    });
+    ```
+    
+    ```typescript New (Sequencer-authorized)
+    import { MultiChainCreditClient } from '@shielded-x402/client';
+    
+    const client = new MultiChainCreditClient({
+      sequencerUrl: 'http://localhost:3200',
+      relayerUrls: {
+        'eip155:8453': 'http://localhost:3100'
+      }
+    });
+    
+    // New: authorize with sequencer, execute via relayer
+    const result = await client.pay({
+      chainRef: 'eip155:8453',
+      amountMicros: '1500000',
+      merchant: {
+        serviceRegistryId: 'demo/base',
+        endpointUrl: merchantUrl
+      },
+      merchantRequest: { /* ... */ },
+      agent: { /* ... */ }
+    });
+    ```
+    </CodeGroup>
+  </Step>
+  
+  <Step title="Update wallet state management">
+    Migrate to new wallet state schema if using file-backed storage:
+    ```typescript
+    import { FileBackedWalletState } from '@shielded-x402/client';
+    
+    // Old wallet state is incompatible
+    // Must recreate wallet state with new schema
+    const walletState = new FileBackedWalletState({
+      filePath: './wallet-state-v2.json',
+      schemaVersion: 2
+    });
+    ```
+  </Step>
+  
+  <Step title="Test the migration">
+    Run integration tests:
+    ```bash
+    # Start full stack
+    pnpm dev:stack:start
+    
+    # Run example
+    pnpm example:multi-chain:base-solana
+    
+    # Verify health
+    curl http://localhost:3200/health
+    curl http://localhost:3100/health
+    ```
+  </Step>
+</Steps>
+
+### API Mapping
+
+| Legacy Endpoint | New Flow |
+|----------------|----------|
+| `POST /v1/relay/credit/issue` | `POST /v1/admin/credit` (sequencer) |
+| `POST /v1/relay/credit/spend` | `POST /v1/credit/authorize` → `POST /v1/relay/pay` |
+| `GET /v1/relay/credit/balance` | Track client-side via authorization responses |
+| N/A | `POST /v1/credit/executions` (relayer → sequencer) |
+| N/A | `GET /v1/commitments/latest` (audit trail) |
+| N/A | `GET /v1/commitments/proof` (inclusion proof) |
+
+## Breaking Changes Summary
+
+### v0.3.0
+- **Wallet state:** Schema v2 incompatible with v1, must recreate
+- **SDK API:** `nullifierSecret` now required in `prepare402Payment`
+- **Environment:** Replace `PAYER_PK_HASH` with `NULLIFIER_SECRET`
+
+### v0.2.x → v0.3.0
+- **No breaking changes** in v0.2.x patch releases
+- Safe to upgrade within v0.2.x series
+
+### Legacy → Current
+- **Complete architecture change:** Credit channel → Sequencer/relayer
+- **All endpoints changed:** See API mapping table above
+- **No backward compatibility:** Must fully migrate
+
+## Rollback Guidance
+
+<Warning>
+  Rolling back from v0.3.0 to v0.2.x is **not supported** due to wallet state schema changes.
+  
+  If you must rollback:
+  1. Back up your v0.3.0 wallet state
+  2. Restore or recreate v0.2.x wallet state
+  3. Downgrade packages: `pnpm install @shielded-x402/client@0.2.4`
+  4. Reseed funds if necessary
+</Warning>
+
+## Getting Help
+
+If you encounter issues during migration:
+
+<CardGroup cols={2}>
+  <Card title="Examples" icon="code" href="/guides/examples">
+    Review working examples for current version
+  </Card>
+  <Card title="Testing" icon="flask" href="/guides/testing">
+    Validate your migration with the test suite
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/concepts/architecture">
+    Understand the new architecture
+  </Card>
+  <Card title="GitHub Issues" icon="github" href="https://github.com/nhestrompia/shielded-x402/issues">
+    Report migration problems
+  </Card>
+</CardGroup>
+
+## Version Support Policy
+
+- **Current version (v0.3.x):** Full support, active development
+- **Previous minor (v0.2.x):** Security fixes only
+- **Legacy credit channel:** No support, must migrate
+
+<Note>
+  Always test migrations in a development environment before deploying to production.
+</Note>

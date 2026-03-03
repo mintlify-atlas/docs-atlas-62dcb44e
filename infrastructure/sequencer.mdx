@@ -1,0 +1,194 @@
+---
+title: 'Credit Sequencer'
+description: 'Setup and configuration for the authoritative multi-chain credit sequencer'
+---
+
+The Credit Sequencer is the authoritative service for multi-chain credit authorization in Shielded x402. It enforces per-agent nonce and balance invariants in real-time, issues signed authorization payloads, and processes relayer execution reports.
+
+## Overview
+
+The sequencer is responsible for:
+
+1. **Credit Authorization** - Enforce per-agent nonce/balance invariants in real time
+2. **Signature Issuance** - Issue signed `AuthorizationV1` payloads for relayer execution
+3. **Execution Processing** - Process relayer execution reports with idempotency checks
+4. **Reclaim Management** - Handle reclaim transitions for expired issued authorizations
+5. **Commitment Building** - Build periodic commitment epochs and optional Base postings
+
+## Installation
+
+From the monorepo root:
+
+```bash
+pnpm --filter @shielded-x402/credit-sequencer migrate:up
+pnpm sequencer:dev
+```
+
+## Required Configuration
+
+The following environment variables are required to run the sequencer:
+
+<ParamField path="SEQUENCER_DATABASE_URL" type="string" required>
+  PostgreSQL connection string for the sequencer database.
+  
+  Example: `postgresql://user:password@localhost:5432/sequencer`
+</ParamField>
+
+<ParamField path="SEQUENCER_SIGNING_PRIVATE_KEY" type="string" required>
+  Ed25519 private key for signing authorizations. Accepts either 32-byte seed or 64-byte secret key as hex.
+  
+  Example: `0x1234567890abcdef...` (64 hex characters for seed, 128 for full key)
+</ParamField>
+
+## Recommended Configuration
+
+<ParamField path="SEQUENCER_SIGNING_KEY_ID" type="string" default="seq-key-1">
+  Logical identifier for the signing key used in authorization payloads.
+</ParamField>
+
+<ParamField path="SEQUENCER_LEAF_SALT_SECRET" type="string">
+  32-byte hex secret used for salting commitment tree leaves.
+  
+  Example: `0xabcdef1234567890...` (64 hex characters)
+</ParamField>
+
+<ParamField path="SEQUENCER_SUPPORTED_CHAIN_REFS" type="string">
+  Comma-separated list of supported chain references in CAIP-2 format.
+  
+  Example: `eip155:84532,solana:devnet`
+</ParamField>
+
+<ParamField path="SEQUENCER_EPOCH_SECONDS" type="number" default="3600">
+  Duration of each commitment epoch in seconds (default: 1 hour).
+</ParamField>
+
+<ParamField path="SEQUENCER_EXECUTION_GRACE_SECONDS" type="number" default="300">
+  Grace period for execution reports after authorization expiry (default: 5 minutes).
+</ParamField>
+
+<ParamField path="SEQUENCER_SWEEPER_SECONDS" type="number" default="30">
+  Interval for the background sweeper process to reclaim expired authorizations.
+</ParamField>
+
+<ParamField path="SEQUENCER_ADMIN_TOKEN" type="string">
+  Bearer token required for administrative endpoints (e.g., `/v1/admin/credit`).
+</ParamField>
+
+<ParamField path="SEQUENCER_RELAYER_KEYS_JSON" type="string">
+  JSON map of relayer public keys for signature verification, organized by chain reference.
+  
+  Example:
+  ```json
+  {
+    "solana:devnet": {
+      "rel-sol-1": "0x<ed25519-pubkey>"
+    },
+    "eip155:84532": {
+      "rel-base-1": "0x<ed25519-pubkey>"
+    }
+  }
+  ```
+</ParamField>
+
+## Base Commitment Posting
+
+Optionally post commitment roots to Base for on-chain audit trails:
+
+<ParamField path="SEQUENCER_BASE_REGISTRY_ADDRESS" type="string">
+  Address of the `CommitmentRegistryV1` contract on Base (see `contracts/src/CommitmentRegistryV1.sol`).
+</ParamField>
+
+<ParamField path="SEQUENCER_BASE_POSTER_PRIVATE_KEY" type="string">
+  Private key for the account that will submit commitment transactions to Base.
+</ParamField>
+
+<ParamField path="SEQUENCER_BASE_RPC_URL" type="string">
+  RPC endpoint for Base network.
+  
+  Example: `https://sepolia.base.org` (Base Sepolia testnet)
+</ParamField>
+
+## API Endpoints
+
+The sequencer exposes the following HTTP endpoints:
+
+### Health & Monitoring
+
+- `GET /health` - Basic health check
+- `GET /health/ready` - Readiness probe (checks database connectivity)
+- `GET /metrics` - Prometheus-compatible metrics
+
+### Credit Operations
+
+- `POST /v1/admin/credit` - Admin endpoint to allocate credit to an agent
+- `POST /v1/credit/authorize` - Request a signed authorization for spending
+- `POST /v1/credit/executions` - Report execution by relayer (called by relayer)
+- `POST /v1/credit/reclaim` - Reclaim expired or unused authorization
+
+### Commitments
+
+- `GET /v1/commitments/latest` - Retrieve the latest commitment epoch
+- `GET /v1/commitments/proof?authId=...` - Get Merkle proof for an authorization
+- `POST /v1/commitments/run` - Manually trigger commitment epoch build
+
+## Configuration Example
+
+```bash .env
+# Database
+SEQUENCER_DATABASE_URL=postgresql://sequencer:password@localhost:5432/sequencer_db
+
+# Signing
+SEQUENCER_SIGNING_PRIVATE_KEY=0xabcd1234...
+SEQUENCER_SIGNING_KEY_ID=seq-key-prod-1
+SEQUENCER_LEAF_SALT_SECRET=0x9876fedc...
+
+# Supported chains
+SEQUENCER_SUPPORTED_CHAIN_REFS=eip155:84532,solana:devnet
+
+# Timing
+SEQUENCER_EPOCH_SECONDS=3600
+SEQUENCER_EXECUTION_GRACE_SECONDS=300
+SEQUENCER_SWEEPER_SECONDS=30
+
+# Security
+SEQUENCER_ADMIN_TOKEN=my-secret-admin-token
+
+# Relayer public keys
+SEQUENCER_RELAYER_KEYS_JSON='{"eip155:84532":{"rel-base-1":"0x..."}}'
+
+# Base commitment posting (optional)
+SEQUENCER_BASE_REGISTRY_ADDRESS=0x1234567890abcdef...
+SEQUENCER_BASE_POSTER_PRIVATE_KEY=0xfedcba9876543210...
+SEQUENCER_BASE_RPC_URL=https://sepolia.base.org
+```
+
+## Testing
+
+To run integration tests with PostgreSQL:
+
+```bash
+export SEQUENCER_TEST_DATABASE_URL=postgresql://test:test@localhost:5432/sequencer_test
+pnpm test
+```
+
+<Note>
+Integration tests are skipped if `SEQUENCER_TEST_DATABASE_URL` is not set.
+</Note>
+
+## Architecture Notes
+
+1. **Execution Correctness** - Enforced at authorization/report time by sequencer state transitions
+2. **Commitment Roots** - Base commitment roots are audit checkpoints and do not gate relayer execution in MVP
+3. **Idempotency** - All execution reports are processed with idempotency checks to prevent double-spending
+4. **Nonce Management** - Per-agent nonces ensure ordered, sequential authorization consumption
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Payment Relayer" icon="server" href="/infrastructure/relayer">
+    Configure relayers to execute authorized payments
+  </Card>
+  <Card title="Smart Contracts" icon="file-contract" href="/infrastructure/contracts">
+    Learn about the on-chain contracts
+  </Card>
+</CardGroup>

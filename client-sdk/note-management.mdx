@@ -1,0 +1,606 @@
+---
+title: 'Note Management'
+description: 'Local indexing and encryption for shielded notes'
+icon: 'database'
+---
+
+## Overview
+
+The Client SDK provides utilities for managing shielded notes locally, including indexing commitments, tracking notes, and encrypting note data for storage or transmission.
+
+## LocalNoteIndexer
+
+`LocalNoteIndexer` is an in-memory note indexer for tracking shielded deposits and spends.
+
+### Constructor
+
+```typescript
+import { LocalNoteIndexer } from '@shielded-x402/client';
+
+const noteStore = new LocalNoteIndexer();
+```
+
+### Methods
+
+#### ingestDeposit
+
+Record a new deposit event and store the associated note.
+
+```typescript
+noteStore.ingestDeposit(
+  event: DepositEvent,
+  note: ShieldedNote
+): void
+```
+
+<ParamField path="event" type="DepositEvent" required>
+  <Expandable title="properties">
+    <ParamField path="commitment" type="Hex" required>
+      Note commitment hash
+    </ParamField>
+    <ParamField path="leafIndex" type="number" required>
+      Position in Merkle tree
+    </ParamField>
+    <ParamField path="amount" type="bigint" required>
+      Deposit amount
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="note" type="ShieldedNote" required>
+  The full note details (amount, rho, pkHash, commitment, leafIndex)
+</ParamField>
+
+##### Example
+
+```typescript
+const { note, leafIndex } = await sdk.deposit(100_000_000n, ownerPkHash);
+
+noteStore.ingestDeposit(
+  {
+    commitment: note.commitment,
+    leafIndex,
+    amount: note.amount
+  },
+  note
+);
+```
+
+#### ingestSpend
+
+Record a spend event, adding merchant and change commitments to the tree.
+
+```typescript
+noteStore.ingestSpend(
+  event: SpendEvent
+): void
+```
+
+<ParamField path="event" type="SpendEvent" required>
+  <Expandable title="properties">
+    <ParamField path="merchantCommitment" type="Hex" required>
+      Commitment for the merchant's note
+    </ParamField>
+    <ParamField path="changeCommitment" type="Hex" required>
+      Commitment for the change note
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+##### Example
+
+```typescript
+const prepared = await sdk.prepare402Payment(
+  requirement,
+  note,
+  witness,
+  nullifierSecret
+);
+
+noteStore.ingestSpend({
+  merchantCommitment: prepared.response.merchantCommitment,
+  changeCommitment: prepared.response.changeCommitment
+});
+
+// Also store the change note for future spending
+const changeNote = prepared.changeNote;
+noteStore.getNotes().push(changeNote);
+```
+
+#### getCommitments
+
+Retrieve all commitments in tree order.
+
+```typescript
+const commitments = noteStore.getCommitments(): Hex[]
+```
+
+<ResponseField name="commitments" type="Hex[]">
+  Array of commitment hashes in the order they were added to the tree
+</ResponseField>
+
+##### Example
+
+```typescript
+import { buildWitnessFromCommitments } from '@shielded-x402/client';
+
+const commitments = noteStore.getCommitments();
+const witness = buildWitnessFromCommitments(commitments, note.leafIndex);
+```
+
+#### getNotes
+
+Retrieve all stored notes.
+
+```typescript
+const notes = noteStore.getNotes(): ShieldedNote[]
+```
+
+<ResponseField name="notes" type="ShieldedNote[]">
+  Array of all shielded notes stored in the indexer
+</ResponseField>
+
+##### Example
+
+```typescript
+const notes = noteStore.getNotes();
+const totalBalance = notes.reduce((sum, n) => sum + n.amount, 0n);
+
+console.log('Total balance:', totalBalance);
+console.log('Note count:', notes.length);
+
+// Find spendable note
+const spendableNote = notes.find(n => n.amount >= 50_000_000n);
+```
+
+## Note Encryption
+
+The SDK provides utilities for encrypting and decrypting notes for secure storage or transmission.
+
+### Symmetric Encryption
+
+#### encryptNoteSymmetric
+
+Encrypt a note using AES-256-GCM with a symmetric key.
+
+```typescript
+import { encryptNoteSymmetric } from '@shielded-x402/client';
+
+const ciphertext = encryptNoteSymmetric(
+  note: ShieldedNote,
+  key: Buffer
+): Hex
+```
+
+<ParamField path="note" type="ShieldedNote" required>
+  Note to encrypt
+</ParamField>
+
+<ParamField path="key" type="Buffer" required>
+  32-byte AES key
+</ParamField>
+
+<ResponseField name="ciphertext" type="Hex">
+  Encrypted note (includes IV, auth tag, and ciphertext)
+</ResponseField>
+
+##### Example
+
+```typescript
+import { randomBytes } from 'node:crypto';
+
+const aesKey = randomBytes(32);
+const encrypted = encryptNoteSymmetric(note, aesKey);
+
+// Store encrypted note
+await db.storeEncryptedNote(note.commitment, encrypted);
+```
+
+#### decryptNoteSymmetric
+
+Decrypt a note encrypted with `encryptNoteSymmetric`.
+
+```typescript
+import { decryptNoteSymmetric } from '@shielded-x402/client';
+
+const note = decryptNoteSymmetric(
+  ciphertext: Hex,
+  key: Buffer
+): ShieldedNote
+```
+
+<ParamField path="ciphertext" type="Hex" required>
+  Encrypted note data
+</ParamField>
+
+<ParamField path="key" type="Buffer" required>
+  32-byte AES key used for encryption
+</ParamField>
+
+<ResponseField name="note" type="ShieldedNote">
+  Decrypted note
+</ResponseField>
+
+##### Example
+
+```typescript
+const encrypted = await db.getEncryptedNote(commitment);
+const note = decryptNoteSymmetric(encrypted, aesKey);
+
+console.log('Decrypted note:', note.amount);
+```
+
+### Public Key Encryption
+
+#### generateNoteEncryptionKeyPair
+
+Generate an ECDH key pair for note encryption.
+
+```typescript
+import { generateNoteEncryptionKeyPair } from '@shielded-x402/client';
+
+const keyPair = generateNoteEncryptionKeyPair(): NoteEncryptionKeyPair
+```
+
+<ResponseField name="NoteEncryptionKeyPair" type="object">
+  <Expandable title="properties">
+    <ResponseField name="privateKey" type="Hex">
+      ECDH private key (secp256k1)
+    </ResponseField>
+    <ResponseField name="publicKey" type="Hex">
+      ECDH public key (secp256k1, uncompressed)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+##### Example
+
+```typescript
+const keyPair = generateNoteEncryptionKeyPair();
+
+console.log('Public key:', keyPair.publicKey);
+// Store private key securely
+await wallet.storeKey('note-encryption-key', keyPair.privateKey);
+```
+
+#### encryptNoteForPublicKey
+
+Encrypt a note for a recipient's public key using ECIES.
+
+```typescript
+import { encryptNoteForPublicKey } from '@shielded-x402/client';
+
+const envelope = encryptNoteForPublicKey(
+  note: ShieldedNote,
+  recipientPublicKey: Hex,
+  aad?: Uint8Array
+): Hex
+```
+
+<ParamField path="note" type="ShieldedNote" required>
+  Note to encrypt
+</ParamField>
+
+<ParamField path="recipientPublicKey" type="Hex" required>
+  Recipient's ECDH public key
+</ParamField>
+
+<ParamField path="aad" type="Uint8Array">
+  Optional additional authenticated data
+</ParamField>
+
+<ResponseField name="envelope" type="Hex">
+  Encrypted envelope (version + ephemeral pubkey + IV + auth tag + ciphertext)
+</ResponseField>
+
+##### Example
+
+```typescript
+const merchantPubKey = '0x04...'; // Merchant's public key
+const encryptedReceipt = encryptNoteForPublicKey(
+  merchantNote,
+  merchantPubKey
+);
+
+// Send encrypted receipt to merchant
+await sendToMerchant(encryptedReceipt);
+```
+
+#### decryptNoteWithPrivateKey
+
+Decrypt a note encrypted with `encryptNoteForPublicKey`.
+
+```typescript
+import { decryptNoteWithPrivateKey } from '@shielded-x402/client';
+
+const note = decryptNoteWithPrivateKey(
+  envelopeCiphertext: Hex,
+  recipientPrivateKey: Hex,
+  aad?: Uint8Array
+): ShieldedNote
+```
+
+<ParamField path="envelopeCiphertext" type="Hex" required>
+  Encrypted envelope from `encryptNoteForPublicKey`
+</ParamField>
+
+<ParamField path="recipientPrivateKey" type="Hex" required>
+  Recipient's ECDH private key
+</ParamField>
+
+<ParamField path="aad" type="Uint8Array">
+  Additional authenticated data (must match encryption AAD)
+</ParamField>
+
+<ResponseField name="note" type="ShieldedNote">
+  Decrypted note
+</ResponseField>
+
+##### Example
+
+```typescript
+const merchantPrivateKey = await wallet.getKey('note-encryption-key');
+const note = decryptNoteWithPrivateKey(
+  encryptedReceipt,
+  merchantPrivateKey
+);
+
+console.log('Received note:', note.amount);
+```
+
+### Serialization
+
+#### serializeNote
+
+Serialize a note to JSON string.
+
+```typescript
+import { serializeNote } from '@shielded-x402/client';
+
+const json = serializeNote(note: ShieldedNote): string
+```
+
+<ParamField path="note" type="ShieldedNote" required>
+  Note to serialize
+</ParamField>
+
+<ResponseField name="json" type="string">
+  JSON string representation
+</ResponseField>
+
+##### Example
+
+```typescript
+const json = serializeNote(note);
+await fs.writeFile('note.json', json);
+```
+
+#### deserializeNote
+
+Deserialize a JSON string to a note.
+
+```typescript
+import { deserializeNote } from '@shielded-x402/client';
+
+const note = deserializeNote(value: string): ShieldedNote
+```
+
+<ParamField path="value" type="string" required>
+  JSON string from `serializeNote`
+</ParamField>
+
+<ResponseField name="note" type="ShieldedNote">
+  Deserialized note
+</ResponseField>
+
+##### Example
+
+```typescript
+const json = await fs.readFile('note.json', 'utf8');
+const note = deserializeNote(json);
+
+console.log('Loaded note:', note.commitment);
+```
+
+## Complete Example
+
+```typescript
+import {
+  ShieldedClientSDK,
+  LocalNoteIndexer,
+  buildWitnessFromCommitments,
+  encryptNoteSymmetric,
+  decryptNoteSymmetric
+} from '@shielded-x402/client';
+import { randomBytes } from 'node:crypto';
+
+// Initialize SDK and indexer
+const sdk = new ShieldedClientSDK({
+  endpoint: RELAYER_URL,
+  signer: async (message) => account.signMessage({ message })
+});
+
+const noteStore = new LocalNoteIndexer();
+const nullifierSecrets = new Map<string, Hex>();
+const encryptionKey = randomBytes(32);
+
+// Deposit
+const { note, leafIndex } = await sdk.deposit(100_000_000n, ownerPkHash);
+
+noteStore.ingestDeposit(
+  { commitment: note.commitment, leafIndex, amount: note.amount },
+  note
+);
+
+const nullifierSecret = '0x...';
+nullifierSecrets.set(note.commitment, nullifierSecret);
+
+// Encrypt and store
+const encrypted = encryptNoteSymmetric(note, encryptionKey);
+await db.store(note.commitment, encrypted);
+
+// Later: spend
+const notes = noteStore.getNotes();
+const spendableNote = notes.find(n => n.amount >= 40_000_000n);
+
+if (spendableNote) {
+  const commitments = noteStore.getCommitments();
+  const witness = buildWitnessFromCommitments(commitments, spendableNote.leafIndex);
+  const secret = nullifierSecrets.get(spendableNote.commitment);
+  
+  const prepared = await sdk.prepare402Payment(
+    requirement,
+    spendableNote,
+    witness,
+    secret
+  );
+  
+  // Track spend
+  noteStore.ingestSpend({
+    merchantCommitment: prepared.response.merchantCommitment,
+    changeCommitment: prepared.response.changeCommitment
+  });
+  
+  // Store change note
+  const changeNote = prepared.changeNote;
+  noteStore.getNotes().push(changeNote);
+  nullifierSecrets.set(changeNote.commitment, prepared.changeNullifierSecret);
+  
+  const encryptedChange = encryptNoteSymmetric(changeNote, encryptionKey);
+  await db.store(changeNote.commitment, encryptedChange);
+}
+
+// Query balance
+const allNotes = noteStore.getNotes();
+const totalBalance = allNotes.reduce((sum, n) => sum + n.amount, 0n);
+console.log('Total balance:', totalBalance);
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Persist Note State">
+    `LocalNoteIndexer` stores notes in memory only. Persist to disk for production:
+    
+    ```typescript
+    class PersistentNoteIndexer extends LocalNoteIndexer {
+      async ingestDeposit(event: DepositEvent, note: ShieldedNote) {
+        super.ingestDeposit(event, note);
+        await this.saveToDb();
+      }
+      
+      async ingestSpend(event: SpendEvent) {
+        super.ingestSpend(event);
+        await this.saveToDb();
+      }
+      
+      private async saveToDb() {
+        const state = {
+          commitments: this.getCommitments(),
+          notes: this.getNotes()
+        };
+        await db.saveNoteState(state);
+      }
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Encrypt Nullifier Secrets">
+    Nullifier secrets must be kept secret. Always encrypt them:
+    
+    ```typescript
+    import { scryptSync } from 'node:crypto';
+    
+    const password = await promptUserPassword();
+    const key = scryptSync(password, 'salt', 32);
+    
+    const encryptedSecret = encryptNoteSymmetric(
+      { ...note, rho: nullifierSecret },
+      key
+    );
+    ```
+  </Accordion>
+  
+  <Accordion title="Track Spent Notes">
+    Mark notes as spent to avoid double-spend attempts:
+    
+    ```typescript
+    interface TrackedNote extends ShieldedNote {
+      spent: boolean;
+      spentAt?: Date;
+    }
+    
+    const notes: TrackedNote[] = [];
+    
+    async function spendNote(note: TrackedNote) {
+      if (note.spent) {
+        throw new Error('Note already spent');
+      }
+      
+      // ... perform spend
+      
+      note.spent = true;
+      note.spentAt = new Date();
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Index by Commitment">
+    For O(1) lookups, index notes by commitment:
+    
+    ```typescript
+    const notesByCommitment = new Map<string, ShieldedNote>();
+    
+    noteStore.getNotes().forEach(note => {
+      notesByCommitment.set(note.commitment, note);
+    });
+    
+    const note = notesByCommitment.get(commitment);
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Type Definitions
+
+### DepositEvent
+
+```typescript
+interface DepositEvent {
+  commitment: Hex;    // Note commitment
+  leafIndex: number;  // Position in Merkle tree
+  amount: bigint;     // Deposit amount
+}
+```
+
+### SpendEvent
+
+```typescript
+interface SpendEvent {
+  merchantCommitment: Hex;  // Merchant's note commitment
+  changeCommitment: Hex;    // Spender's change note commitment
+}
+```
+
+### NoteState
+
+```typescript
+interface NoteState {
+  commitments: Hex[];        // All commitments in tree order
+  notes: ShieldedNote[];     // All tracked notes
+}
+```
+
+### StoredNote
+
+```typescript
+interface StoredNote {
+  note: ShieldedNote;    // The note
+  ciphertext?: Hex;      // Optional encrypted form
+}
+```
+
+## See Also
+
+- [ShieldedClientSDK](/client-sdk/shielded-client) - Core SDK for building proofs
+- [createShieldedFetch](/client-sdk/shielded-fetch) - Automatic 402 handling
+- [Overview](/client-sdk/overview) - SDK architecture

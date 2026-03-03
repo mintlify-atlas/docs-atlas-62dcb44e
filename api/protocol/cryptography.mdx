@@ -1,0 +1,389 @@
+---
+title: 'Cryptographic Primitives'
+description: 'Cryptographic primitives and parameters for the shielded payment protocol'
+---
+
+## Overview
+
+The protocol uses frozen cryptographic parameters to ensure consistency across implementations. All parameters are defined in `packages/shared-types/src/crypto-spec.ts`.
+
+## Cryptographic Specification
+
+### Version
+
+```typescript
+const CRYPTO_SPEC = {
+  version: 'v0.1.0',
+  // ...
+};
+```
+
+The current protocol version is **v0.1.0**. All implementations must use identical parameters.
+
+## Hash Function
+
+### Primitive
+
+```typescript
+hashFunction: 'keccak256'
+```
+
+All hashing operations use **Keccak-256** (not SHA3-256). This is the same hash function used by Ethereum.
+
+### Properties
+
+- **Output size**: 32 bytes (256 bits)
+- **Security level**: 128-bit collision resistance
+- **Standard**: FIPS 202 (Keccak)
+
+### Usage
+
+- Note commitments
+- Nullifier derivation
+- Challenge hash computation
+- Merkle tree construction
+- Domain separation
+
+## Merkle Tree
+
+### Depth
+
+```typescript
+merkleTreeDepth: 24
+```
+
+The note commitment tree has a fixed depth of **24 levels**.
+
+### Capacity
+
+- **Maximum leaves**: 2^24 = 16,777,216 notes
+- **Path length**: 24 siblings (768 bytes)
+
+### Structure
+
+```
+                    Root (Level 0)
+                   /    \
+                  /      \
+            Level 1    Level 1
+               /  \        /  \
+             ...  ...    ...  ...
+            /                    \
+    Level 23                  Level 23
+     /    \                    /    \
+Leaf 0  Leaf 1  ...  Leaf 16777215
+```
+
+### Merkle Path
+
+Proof of inclusion requires 24 sibling hashes:
+
+```typescript
+interface MerklePath {
+  siblings: Hex[]; // 24 x 32-byte hashes
+  leafIndex: number; // 0 to 16777215
+}
+```
+
+## Note Encoding
+
+### Scheme
+
+```typescript
+noteEncoding: 'abi-packed-v1'
+```
+
+Notes are encoded using **ABI-packed-v1** format for commitment computation.
+
+### Structure
+
+```typescript
+interface NotePreimage {
+  amount: bigint;    // 32 bytes (uint256)
+  rho: Hex;         // 32 bytes (bytes32)
+  pkHash: Hex;      // 32 bytes (bytes32)
+}
+```
+
+### Encoding
+
+ABI-packed encoding concatenates values without padding:
+
+```
+encoded = abi.encodePacked(amount, rho, pkHash)
+// Total: 96 bytes
+```
+
+### Commitment
+
+```typescript
+commitment = keccak256(abi.encodePacked(amount, rho, pkHash))
+```
+
+## Nullifier Derivation
+
+### Formula
+
+```typescript
+nullifierDerivation: 'keccak256(nullifierSecret, noteCommitment)'
+```
+
+Nullifiers are derived by hashing the secret and commitment:
+
+```typescript
+nullifier = keccak256(nullifierSecret, noteCommitment)
+```
+
+### Inputs
+
+<ResponseField name="nullifierSecret" type="Hex" required>
+  Private 32-byte secret known only to note owner
+</ResponseField>
+
+<ResponseField name="noteCommitment" type="Hex" required>
+  Public 32-byte commitment to the note
+</ResponseField>
+
+### Properties
+
+- **Deterministic**: Same inputs always produce same nullifier
+- **One-way**: Cannot reverse to find secret
+- **Collision-resistant**: Extremely unlikely to have duplicates
+
+## Output Commitments
+
+### Merchant Commitment
+
+```typescript
+merchantCommitmentDerivation: 'keccak256(payAmount, merchantRho, merchantPkHash)'
+```
+
+Commitment to the merchant's output note:
+
+```typescript
+merchantCommitment = keccak256(
+  toHexWord(payAmount),
+  merchantRho,
+  merchantPkHash
+)
+```
+
+### Change Commitment
+
+```typescript
+changeCommitmentDerivation: 'keccak256(changeAmount, changeRho, changePkHash)'
+```
+
+Commitment to the sender's change note:
+
+```typescript
+changeCommitment = keccak256(
+  toHexWord(changeAmount),
+  changeRho,
+  changePkHash
+)
+```
+
+## Domain Separators
+
+Domain separators prevent cross-protocol and cross-context attacks.
+
+### Challenge Domain
+
+```typescript
+challengeDomainSeparator: 'shielded-x402:v1:challenge'
+challengeDomainHash: '0xe32e24a51c351093d339c0035177dc2da5c1b8b9563e414393edd75506dcc055'
+```
+
+Used for binding payments to merchant challenges.
+
+**Domain hash** is `keccak256("shielded-x402:v1:challenge")`.
+
+### Commitment Domain
+
+```typescript
+commitmentDomainSeparator: 'shielded-x402:v1:commitment'
+```
+
+Used for note commitment construction. Applied implicitly through the note encoding scheme.
+
+### Output Domain
+
+```typescript
+outputDomainSeparator: 'shielded-x402:v1:output'
+```
+
+Used for merchant and change output commitments.
+
+### Nullifier Domain
+
+```typescript
+nullifierDomainSeparator: 'shielded-x402:v1:nullifier'
+```
+
+Used for nullifier derivation to prevent cross-protocol nullifier reuse.
+
+## Utility Functions
+
+### Hex Word Conversion
+
+Convert values to 32-byte hex words:
+
+```typescript
+function toHexWord(value: bigint | number | string): Hex {
+  const normalized = BigInt(value);
+  if (normalized < 0n) {
+    throw new Error('toHexWord expects a non-negative value');
+  }
+  return `0x${normalized.toString(16).padStart(64, '0')}`;
+}
+```
+
+**Example:**
+```typescript
+toHexWord(1000000n)
+// "0x00000000000000000000000000000000000000000000000000000000000f4240"
+```
+
+### Address Padding
+
+Pad Ethereum addresses to 32-byte words:
+
+```typescript
+function padAddressToWord(address: Hex): Hex {
+  const stripped = address.toLowerCase().replace(/^0x/, '');
+  if (stripped.length > 40) {
+    throw new Error('address exceeds 20 bytes');
+  }
+  return `0x${stripped.padStart(64, '0')}`;
+}
+```
+
+**Example:**
+```typescript
+padAddressToWord("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb")
+// "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f0beb"
+```
+
+## Hex Validation
+
+### General Hex
+
+Validate hex strings of any length:
+
+```typescript
+function isHex(value: unknown): value is Hex {
+  return typeof value === 'string' && /^0x[0-9a-fA-F]*$/.test(value);
+}
+```
+
+### 32-Byte Hex
+
+Validate exactly 32-byte (64 hex character) values:
+
+```typescript
+function isHex32(value: unknown): value is Hex {
+  return typeof value === 'string' && /^0x[0-9a-fA-F]{64}$/.test(value);
+}
+```
+
+### Normalization
+
+Normalize hex strings to canonical format:
+
+```typescript
+function normalizeHex(value: string): Hex {
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed.startsWith('0x')) {
+    return trimmed as Hex;
+  }
+  return `0x${trimmed}` as Hex;
+}
+```
+
+## Validation
+
+### Payment Validation
+
+The protocol provides validation for shielded payment responses:
+
+```typescript
+interface ShieldedPaymentValidationOptions {
+  exactPublicInputsLength?: number;
+  minPublicInputsLength?: number;
+  maxProofHexLength?: number;
+}
+
+function validateShieldedPaymentResponseShape(
+  payload: unknown,
+  options?: ShieldedPaymentValidationOptions
+): string | undefined;
+```
+
+**Returns:** `undefined` if valid, error message string if invalid.
+
+### Validation Checks
+
+- **proof**: Must be valid hex
+- **publicInputs**: Array of hex values
+- **nullifier**: Must be exactly 32 bytes
+- **root**: Must be exactly 32 bytes
+- **merchantCommitment**: Must be exactly 32 bytes
+- **changeCommitment**: Must be exactly 32 bytes
+- **challengeHash**: Must be exactly 32 bytes
+- **encryptedReceipt**: Must be valid hex
+
+### Example
+
+```typescript
+const error = validateShieldedPaymentResponseShape(payment, {
+  exactPublicInputsLength: 6,
+  maxProofHexLength: 2000
+});
+
+if (error) {
+  console.error('Invalid payment:', error);
+} else {
+  console.log('Payment is valid');
+}
+```
+
+## Security Considerations
+
+### Parameter Freeze
+
+All cryptographic parameters are frozen for the MVP. Changing parameters would:
+- Break compatibility with existing deployments
+- Invalidate existing proofs
+- Require new smart contract deployments
+
+### Domain Separation
+
+Domain separators prevent:
+- Cross-protocol attacks
+- Signature replay across contexts
+- Hash collision attacks
+
+### Random Values
+
+All random values (`rho`, `nullifierSecret`) must use cryptographically secure randomness:
+
+```typescript
+import { randomBytes } from 'crypto';
+
+const rho = `0x${randomBytes(32).toString('hex')}` as Hex;
+const nullifierSecret = `0x${randomBytes(32).toString('hex')}` as Hex;
+```
+
+### Constant-Time Operations
+
+Secret values should be compared using constant-time operations to prevent timing attacks:
+
+```typescript
+import { timingSafeEqual } from 'crypto';
+
+const equal = timingSafeEqual(
+  Buffer.from(secret1.slice(2), 'hex'),
+  Buffer.from(secret2.slice(2), 'hex')
+);
+```

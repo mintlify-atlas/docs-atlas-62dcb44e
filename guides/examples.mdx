@@ -1,0 +1,360 @@
+---
+title: Examples
+description: Example applications and flows for Shielded x402
+---
+
+This guide walks through the example applications included in the Shielded x402 repository, demonstrating different integration patterns and use cases.
+
+## Available Examples
+
+### Multi-Chain Base + Solana Flow
+
+The primary example demonstrating a full sequencer-authorized flow with one agent making payments across two chains.
+
+**Location:** `examples/multi-chain-base-solana/`
+
+**What it demonstrates:**
+- Sequencer-authorized credit flow
+- Dual-relayer payment execution (Base + Solana)
+- Same credit balance used across multiple chains
+- Commitment epoch processing
+
+#### Prerequisites
+
+Before running this example:
+
+<Steps>
+  <Step title="Start the sequencer">
+    Ensure the sequencer is running with Postgres migrations applied.
+  </Step>
+  
+  <Step title="Start Base relayer">
+    Run in `noop` mode for testing or `evm` mode for on-chain transactions.
+  </Step>
+  
+  <Step title="Start Solana relayer">
+    Configure with `RELAYER_PAYOUT_MODE=solana`.
+  </Step>
+  
+  <Step title="Deploy Solana contracts">
+    Deploy and initialize the Solana verifier and gateway:
+    ```bash
+    pnpm --dir chains/solana/client install
+    bash chains/solana/scripts/deploy-verifier.sh
+    bash chains/solana/scripts/deploy-gateway.sh
+    pnpm tsx chains/solana/scripts/init-gateway.ts
+    ```
+  </Step>
+</Steps>
+
+#### Environment Setup
+
+```bash .env.example
+# Required
+SEQUENCER_URL=http://127.0.0.1:3200
+BASE_RELAYER_URL=http://127.0.0.1:3100
+SOLANA_RELAYER_URL=http://127.0.0.1:3101
+SEQUENCER_ADMIN_TOKEN=change-me
+
+# Solana configuration
+SOLANA_RPC_URL=https://api.devnet.solana.com
+SOLANA_WS_URL=wss://api.devnet.solana.com
+SOLANA_GATEWAY_PROGRAM_ID=<gateway_program_id>
+SOLANA_VERIFIER_PROGRAM_ID=<verifier_program_id>
+SOLANA_STATE_ACCOUNT=<gateway_state_pda>
+SOLANA_PAYER_KEYPAIR_PATH=<path_to_keypair_json>
+SOLANA_RECIPIENT_ADDRESS=<recipient_pubkey>
+
+# Optional Base on-chain
+BASE_ONCHAIN=true
+BASE_RPC_URL=https://sepolia.base.org
+BASE_RECIPIENT_ADDRESS=<0x_recipient>
+BASE_CHAIN_ID=84532
+BASE_CHAIN_REF=eip155:84532
+
+# Optional commitment processing
+RUN_COMMITMENT_EPOCH=true
+```
+
+#### Running the Example
+
+```bash
+pnpm --dir examples/multi-chain-base-solana start
+```
+
+Or use the root command:
+
+```bash
+pnpm example:multi-chain:base-solana
+```
+
+#### Understanding the Flow
+
+<Steps>
+  <Step title="Agent key generation">
+    The example generates an Ed25519 keypair for the agent and derives the agent ID from the public key.
+  </Step>
+  
+  <Step title="Credit the agent">
+    Uses the admin endpoint to credit the agent's balance in the sequencer:
+    ```typescript
+    await client.adminCredit({
+      agentId,
+      amountMicros: totalCredit
+    });
+    ```
+  </Step>
+  
+  <Step title="Base payment authorization">
+    Creates an intent for Base payment, signs it with the agent's private key, and submits to the sequencer:
+    ```typescript
+    const baseIntent: IntentV1 = {
+      version: 1,
+      agentId,
+      agentPubKey,
+      signatureScheme: 'ed25519-sha256-v1',
+      agentNonce: '0',
+      amountMicros: baseAmountMicros,
+      merchantId: baseMerchantId,
+      requiredChainRef: baseChainRef,
+      expiresAt: String(now + 300),
+      requestId: randomHex32()
+    };
+    const baseAuth = await client.authorize({
+      intent: baseIntent,
+      agentSig: signIntent(baseIntent, privateKey)
+    });
+    ```
+  </Step>
+  
+  <Step title="Base relay execution">
+    Submits the authorization to the Base relayer with merchant request details:
+    ```typescript
+    const baseRelayPayload: RelayPayRequestV1 = {
+      authorization: baseAuth.authorization,
+      sequencerSig: baseAuth.sequencerSig,
+      merchantRequest: {
+        url: baseMerchantUrl,
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        bodyBase64: Buffer.from(JSON.stringify(merchantData)).toString('base64')
+      }
+    };
+    const baseRelayResult = await postRelayPay(baseRelayerUrl, baseRelayPayload);
+    ```
+  </Step>
+  
+  <Step title="Solana payment authorization">
+    Creates a second intent for Solana with incremented nonce:
+    ```typescript
+    const solanaIntent: IntentV1 = {
+      version: 1,
+      agentId,
+      agentPubKey,
+      signatureScheme: 'ed25519-sha256-v1',
+      agentNonce: '1', // Incremented
+      amountMicros: solanaAmountMicros,
+      merchantId: solanaMerchantId,
+      requiredChainRef: SOLANA_CHAIN_REF,
+      expiresAt: String(now + 300),
+      requestId: randomHex32()
+    };
+    ```
+  </Step>
+  
+  <Step title="Solana relay execution">
+    Submits to the Solana relayer with proof data and gateway configuration.
+  </Step>
+  
+  <Step title="Commitment proof (optional)">
+    If `RUN_COMMITMENT_EPOCH=true`, triggers commitment processing and retrieves inclusion proofs:
+    ```typescript
+    const baseProof = await client.commitmentProof(baseAuth.authorization.authId);
+    console.log(`base commitment epoch: ${baseProof.epochId}`);
+    ```
+  </Step>
+</Steps>
+
+### PayAI x402 Echo Example
+
+Demonstrates standard x402 client flow against a commercial facilitator.
+
+**Location:** `examples/payai-echo-fetch/`
+
+**What it demonstrates:**
+- Standard x402 protocol usage
+- Integration with commercial x402 facilitators
+- Using `x402-fetch` wrapper for automatic payment handling
+
+<Warning>
+  This example does **not** use the shielded proof/relayer flow. For shielded USDC payments, you need your own relayer or a facilitator that supports:
+  - Challenge binding checks
+  - Proof verification
+  - `ShieldedPool.submitSpend(...)` settlement
+</Warning>
+
+#### Running the Example
+
+<Steps>
+  <Step title="Navigate to example directory">
+    ```bash
+    cd examples/payai-echo-fetch
+    ```
+  </Step>
+  
+  <Step title="Install dependencies">
+    ```bash
+    npm install
+    ```
+  </Step>
+  
+  <Step title="Configure environment">
+    ```bash
+    cp .env.example .env
+    # Set PRIVATE_KEY in .env
+    ```
+  </Step>
+  
+  <Step title="Run the example">
+    ```bash
+    npm run start
+    ```
+  </Step>
+</Steps>
+
+#### Code Walkthrough
+
+```javascript test-payai.mjs
+import { createWalletClient, http } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { baseSepolia } from 'viem/chains';
+import { wrapFetchWithPayment } from 'x402-fetch';
+
+const account = privateKeyToAccount(process.env.PRIVATE_KEY);
+const walletClient = createWalletClient({
+  account,
+  chain: baseSepolia,
+  transport: http(process.env.BASE_SEPOLIA_RPC_URL)
+});
+
+// Wrap fetch with automatic x402 payment handling
+const fetchWithPayment = wrapFetchWithPayment(fetch, walletClient);
+
+// Call protected endpoint - payment handled automatically
+const response = await fetchWithPayment(
+  'https://x402.payai.network/api/base-sepolia/paid-content',
+  { method: 'GET' }
+);
+```
+
+### Demo API Example
+
+Basic shielded x402 payment flow demonstration.
+
+**Location:** `examples/demo-api/src/run-demo.ts`
+
+**What it demonstrates:**
+- `ShieldedClientSDK` usage
+- Deposit flow
+- Witness construction from commitments
+- 402 payment header preparation
+
+#### Key Code
+
+```typescript run-demo.ts
+import {
+  ShieldedClientSDK,
+  buildWitnessFromCommitments
+} from '@shielded-x402/client';
+import { X402_HEADERS, parsePaymentRequiredHeader } from '@shielded-x402/shared-types';
+import { privateKeyToAccount } from 'viem/accounts';
+
+const account = privateKeyToAccount(
+  '0x59c6995e998f97a5a0044966f09453842c9f9f4d6f8f8fcaef4f8f16c5b6f4c0'
+);
+
+const sdk = new ShieldedClientSDK({
+  endpoint: 'http://localhost:3000',
+  signer: async (message) => account.signMessage({ message })
+});
+
+// Deposit funds
+const ownerPkHash = '0xaaaa...' as Hex;
+const deposited = await sdk.deposit(1_000_000n, ownerPkHash);
+
+// Build witness from commitments
+const commitments = [deposited.note.commitment];
+const witness = buildWitnessFromCommitments(commitments, 0);
+
+// Fetch protected resource
+const merchantUrl = 'http://localhost:3000/paid/data';
+const first = await fetch(merchantUrl, { method: 'GET' });
+
+if (first.status === 402) {
+  const header = first.headers.get(X402_HEADERS.paymentRequired);
+  const requirement = parsePaymentRequiredHeader(header);
+  
+  // Prepare payment
+  const prepared = await sdk.prepare402Payment(
+    requirement,
+    deposited.note,
+    witness,
+    '0x0000000000000000000000000000000000000000000000000000000000000009'
+  );
+  
+  // Retry with payment headers
+  const response = await fetch(merchantUrl, {
+    method: 'GET',
+    headers: prepared.headers
+  });
+  
+  console.log(await response.text());
+}
+```
+
+## Legacy Examples
+
+<Warning>
+  The following examples have been deprecated:
+  - `payai-shielded-relay` - Legacy credit-channel scripts removed
+  - `agent-to-agent-relayed` - Legacy credit-channel flow scripts removed
+  
+  Use the sequencer-authorized multi-chain flow instead (see documentation in `docs/multi-chain-credit-mvp.md`).
+</Warning>
+
+## Quick Start with Examples
+
+To quickly run the full stack with examples:
+
+```bash
+# Install dependencies
+pnpm install
+pnpm contracts:deps
+pnpm build
+
+# Start local sequencer + base relayer + solana relayer
+pnpm dev:stack:start
+
+# Run dual-chain example (base noop + solana onchain)
+pnpm example:multi-chain:base-solana
+
+# Stop services when done
+pnpm dev:stack:stop
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Testing Guide" icon="flask" href="/guides/testing">
+    Learn how to test your Shielded x402 integration
+  </Card>
+  <Card title="Client SDK" icon="code" href="/client-sdk/overview">
+    Explore the full Client SDK capabilities
+  </Card>
+  <Card title="Multi-Chain Support" icon="link" href="/chains/overview">
+    Learn about multi-chain payment support
+  </Card>
+  <Card title="API Reference" icon="book" href="/api/sequencer/authorize">
+    View complete API documentation
+  </Card>
+</CardGroup>

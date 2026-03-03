@@ -1,0 +1,495 @@
+---
+title: Testing Guide
+description: Comprehensive testing guide for Shielded x402
+---
+
+This guide covers the complete testing workflow for Shielded x402, from baseline checks to integration testing across multiple chains.
+
+## Testing Philosophy
+
+Shielded x402 testing ensures:
+- **Protocol correctness**: Nonce progression, balance enforcement, and state transitions
+- **Multi-chain reliability**: Integration tests across Base and Solana
+- **Cryptographic soundness**: Circuit verification and proof generation
+- **API contract compliance**: Sequencer and relayer behavior validation
+
+## Baseline Checks
+
+Run these checks before any development or release:
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    pnpm install
+    ```
+  </Step>
+  
+  <Step title="Run doctor command">
+    Validates workspace health and dependencies:
+    ```bash
+    pnpm doctor
+    ```
+  </Step>
+  
+  <Step title="Type checking">
+    Verify TypeScript types across all packages:
+    ```bash
+    pnpm typecheck
+    ```
+  </Step>
+  
+  <Step title="Run unit tests">
+    Execute all package-level unit tests:
+    ```bash
+    pnpm test
+    ```
+  </Step>
+  
+  <Step title="Contract tests">
+    Run Foundry tests for Solidity contracts:
+    ```bash
+    pnpm contracts:test
+    ```
+  </Step>
+  
+  <Step title="Circuit verification">
+    Validate circuit compilation and structure:
+    ```bash
+    pnpm circuit:check
+    pnpm circuit:verifier
+    pnpm circuit:fixture
+    ```
+  </Step>
+</Steps>
+
+## Package-Level Tests
+
+Test individual packages in isolation:
+
+### Shared Types
+
+```bash
+pnpm --filter @shielded-x402/shared-types test
+```
+
+Validates core type definitions and utilities used across the system.
+
+### Client SDK
+
+```bash
+pnpm --filter @shielded-x402/client typecheck
+pnpm --filter @shielded-x402/client test
+```
+
+Tests client-side functionality:
+- Note management and indexing
+- Witness construction
+- Payment preparation
+- Multi-chain credit client operations
+
+### Merchant SDK
+
+```bash
+pnpm --filter @shielded-x402/merchant typecheck
+pnpm --filter @shielded-x402/merchant test
+```
+
+Validates merchant-side utilities:
+- Payment verification
+- Header parsing
+- Requirement generation
+
+### Payment Relayer
+
+```bash
+pnpm --filter @shielded-x402/payment-relayer typecheck
+pnpm --filter @shielded-x402/payment-relayer test
+```
+
+Tests relayer logic:
+- Authorization validation
+- Payout provider integration
+- Execution report generation
+- Chain-specific adapters
+
+## Protocol Property Tests
+
+These tests verify critical protocol invariants:
+
+<AccordionGroup>
+  <Accordion title="Strict per-agent nonce progression">
+    Validates that `agentNonce == nextAgentNonce` for all accepted authorizations.
+    
+    **Why it matters:** Prevents replay attacks and ensures temporal ordering of payments.
+  </Accordion>
+  
+  <Accordion title="No overspend">
+    Ensures `balanceMicros` never goes negative.
+    
+    **Why it matters:** Core financial invariant - agents can only spend credited funds.
+  </Accordion>
+  
+  <Accordion title="Execution idempotency">
+    Verifies:
+    - `auth_id` is unique across all authorizations
+    - Duplicate transaction hash is accepted (safe retry)
+    - Conflicting hash for same auth_id is rejected
+    
+    **Why it matters:** Enables safe retries while preventing double-execution.
+  </Accordion>
+  
+  <Accordion title="Reclaim transition guard">
+    Validates `ISSUED -> RECLAIMED` transition only after expiry.
+    
+    **Why it matters:** Prevents premature reclaims that could enable double-spending.
+  </Accordion>
+  
+  <Accordion title="Relayer chainRef enforcement">
+    Ensures each relayer instance only processes payments for its configured chain.
+    
+    **Why it matters:** Prevents cross-chain execution errors.
+  </Accordion>
+</AccordionGroup>
+
+## Local Integration Testing
+
+Test the complete flow with a local Anvil chain.
+
+<Steps>
+  <Step title="Start Anvil">
+    ```bash
+    anvil --chain-id 31337
+    ```
+  </Step>
+  
+  <Step title="Deploy contracts">
+    ```bash
+    pnpm deploy:anvil:dummy
+    ```
+  </Step>
+  
+  <Step title="Run smoke tests">
+    ```bash
+    pnpm e2e:anvil
+    ```
+  </Step>
+</Steps>
+
+## Sequencer/Relayer Integration
+
+Test the full sequencer and relayer interaction:
+
+<Steps>
+  <Step title="Start services">
+    Launch sequencer and relayer with chain-specific environment configuration.
+    ```bash
+    pnpm dev:stack:start
+    ```
+  </Step>
+  
+  <Step title="Verify health endpoints">
+    Check both services are running:
+    ```bash
+    curl http://localhost:3200/health  # Sequencer
+    curl http://localhost:3100/health  # Base relayer
+    curl http://localhost:3101/health  # Solana relayer
+    ```
+  </Step>
+  
+  <Step title="Credit an agent">
+    ```bash
+    curl -X POST http://localhost:3200/v1/admin/credit \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer change-me" \
+      -d '{
+        "agentId": "0x1234...",
+        "amountMicros": "10000000"
+      }'
+    ```
+  </Step>
+  
+  <Step title="Submit authorization">
+    ```bash
+    curl -X POST http://localhost:3200/v1/credit/authorize \
+      -H "Content-Type: application/json" \
+      -d '{
+        "intent": {...},
+        "agentSig": "0x..."
+      }'
+    ```
+  </Step>
+  
+  <Step title="Execute payment">
+    ```bash
+    curl -X POST http://localhost:3100/v1/relay/pay \
+      -H "Content-Type: application/json" \
+      -d '{
+        "authorization": {...},
+        "sequencerSig": "0x...",
+        "merchantRequest": {...}
+      }'
+    ```
+  </Step>
+  
+  <Step title="Verify execution report">
+    Relayer should POST to `/v1/credit/executions` automatically.
+  </Step>
+  
+  <Step title="Generate commitment proof">
+    ```bash
+    curl -X POST http://localhost:3200/v1/commitments/run
+    curl "http://localhost:3200/v1/commitments/proof?authId=0x..."
+    ```
+  </Step>
+</Steps>
+
+## Solana Integration Tests
+
+Test Solana-specific functionality:
+
+<Steps>
+  <Step title="Build and test gateway program">
+    ```bash
+    pnpm solana:program:test
+    ```
+  </Step>
+  
+  <Step title="Install Solana adapter dependencies">
+    ```bash
+    pnpm --dir chains/solana/client install
+    ```
+  </Step>
+  
+  <Step title="Deploy Solana programs">
+    Deploy verifier, gateway, and initialize state:
+    ```bash
+    pnpm solana:deploy:verifier
+    pnpm solana:deploy:gateway
+    pnpm solana:init:gateway
+    ```
+  </Step>
+  
+  <Step title="Configure Solana relayer">
+    Set required environment variables:
+    ```bash
+    export RELAYER_CHAIN_REF=solana:devnet
+    export SOLANA_RPC_URL=https://api.devnet.solana.com
+    export SOLANA_WS_URL=wss://api.devnet.solana.com
+    export SOLANA_GATEWAY_PROGRAM_ID=<program_id>
+    export SOLANA_VERIFIER_PROGRAM_ID=<verifier_id>
+    export SOLANA_STATE_ACCOUNT=<state_pda>
+    export SOLANA_PAYER_KEYPAIR_PATH=<keypair_path>
+    ```
+  </Step>
+  
+  <Step title="Run authorization flow">
+    Execute authorize → relay pay → execution report sequence.
+    Verify sequencer status shows `EXECUTED`.
+  </Step>
+  
+  <Step title="Run multi-chain example">
+    ```bash
+    pnpm example:multi-chain:base-solana
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  **Indexer Note:** Solana indexer is optional for MVP correctness. The sequencer remains the source of truth, with relayers submitting execution reports containing transaction signatures. Add a Solana indexer later for observability and reconciliation.
+</Note>
+
+## Base Commitment Registry Tests
+
+Test Base-specific commitment functionality:
+
+```bash
+forge test --root contracts --match-path test/CommitmentRegistryV1.t.sol
+```
+
+**What this validates:**
+- Epoch sequencing
+- `prevRoot` linkage between epochs
+- Unauthorized poster rejection
+- Commitment merkle tree construction
+
+## Pre-Release Regression Checklist
+
+Run this full suite before any release:
+
+```bash
+# 1. Type checking
+pnpm typecheck
+
+# 2. All unit tests
+pnpm test
+
+# 3. Contract tests
+pnpm contracts:test
+
+# 4. Package-specific tests
+pnpm --filter @shielded-x402/payment-relayer test
+pnpm --filter @shielded-x402/credit-sequencer test
+pnpm --filter @shielded-x402/client test
+```
+
+<Warning>
+  All tests must pass before merging to main or creating a release.
+</Warning>
+
+## Continuous Integration
+
+The testing playbook is designed for CI/CD integration. Recommended workflow:
+
+<CodeGroup>
+```yaml .github/workflows/test.yml
+name: Test
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install pnpm
+        run: npm install -g pnpm
+      
+      - name: Install dependencies
+        run: pnpm install
+      
+      - name: Run baseline checks
+        run: |
+          pnpm doctor
+          pnpm typecheck
+          pnpm test
+          pnpm contracts:test
+          pnpm circuit:check
+      
+      - name: Run package tests
+        run: |
+          pnpm --filter @shielded-x402/client test
+          pnpm --filter @shielded-x402/merchant test
+          pnpm --filter @shielded-x402/payment-relayer test
+```
+</CodeGroup>
+
+## Writing New Tests
+
+When adding new functionality, follow these guidelines:
+
+### Unit Tests
+
+Place tests alongside source code:
+
+```
+packages/client/src/
+├── multiChainCredit.ts
+└── multiChainCredit.test.ts
+```
+
+### Integration Tests
+
+Use descriptive test names that explain the scenario:
+
+```typescript
+describe('MultiChainCreditClient', () => {
+  it('should enforce nonce progression across multiple payments', async () => {
+    // Test implementation
+  });
+  
+  it('should reject authorization when balance is insufficient', async () => {
+    // Test implementation
+  });
+});
+```
+
+### Property-Based Tests
+
+For protocol invariants, use property-based testing:
+
+```typescript
+import { fc, test } from '@fast-check/vitest';
+
+test.prop([
+  fc.array(fc.nat(), { minLength: 1, maxLength: 100 })
+])('nonce sequence must be strictly increasing', (nonces) => {
+  const sorted = [...nonces].sort((a, b) => a - b);
+  expect(validateNonceSequence(sorted)).toBe(true);
+});
+```
+
+## Troubleshooting Test Failures
+
+<AccordionGroup>
+  <Accordion title="Circuit check failures">
+    **Symptoms:** `pnpm circuit:check` fails with verification errors
+    
+    **Solutions:**
+    - Ensure Noir is installed: `noirup`
+    - Rebuild circuits: `pnpm circuit:build`
+    - Check circuit artifact freshness in `dist/circuits/`
+  </Accordion>
+  
+  <Accordion title="Contract test failures">
+    **Symptoms:** Foundry tests fail or timeout
+    
+    **Solutions:**
+    - Install contract dependencies: `pnpm contracts:deps`
+    - Update Foundry: `foundryup`
+    - Check for chain compatibility issues
+  </Accordion>
+  
+  <Accordion title="Integration test timeouts">
+    **Symptoms:** Tests hang or timeout waiting for services
+    
+    **Solutions:**
+    - Verify all services are running: check health endpoints
+    - Increase test timeouts for network operations
+    - Check service logs for errors
+  </Accordion>
+  
+  <Accordion title="Solana program test failures">
+    **Symptoms:** Program deployment or tests fail
+    
+    **Solutions:**
+    - Ensure Solana CLI is installed and updated
+    - Check RPC endpoint availability
+    - Verify keypair permissions and SOL balance
+  </Accordion>
+</AccordionGroup>
+
+## Test Coverage
+
+Monitor test coverage to ensure adequate testing:
+
+```bash
+pnpm test --coverage
+```
+
+**Coverage targets:**
+- Protocol logic: 90%+
+- SDK public APIs: 85%+
+- Utility functions: 80%+
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Examples" icon="code" href="/guides/examples">
+    Explore example applications
+  </Card>
+  <Card title="Installation" icon="hammer" href="/installation">
+    Set up your development environment
+  </Card>
+  <Card title="Infrastructure" icon="server" href="/infrastructure/deployment">
+    Deploy sequencer and relayers
+  </Card>
+  <Card title="Migration Guide" icon="arrow-right" href="/guides/migration">
+    Migrate from legacy versions
+  </Card>
+</CardGroup>

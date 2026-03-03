@@ -1,0 +1,239 @@
+---
+title: 'Signature Schemes'
+description: 'Signature schemes and verification for X402 protocol'
+---
+
+## Overview
+
+The protocol uses cryptographic signatures to authenticate payment flows and bind commitments to merchant challenges. All signatures operate on structured data with domain separation.
+
+## X402 Signature Flow
+
+The X402 protocol requires signatures at two critical points:
+
+1. **Payment Signature**: Client signs the payment proof and challenge
+2. **Merchant Verification**: Merchant verifies signature before accepting payment
+
+### Signature Structure
+
+```typescript
+interface X402PaymentSignaturePayload {
+  x402Version: 2;
+  accepted: PaymentRequirement;
+  payload: ShieldedPaymentResponse;
+  challengeNonce: Hex;
+  signature: Hex;
+}
+```
+
+The `signature` field contains the hex-encoded signature over:
+- The payment requirement (canonical JSON)
+- The shielded payment response
+- The challenge nonce
+
+## Challenge Hash Derivation
+
+Challenge hashes bind payments to specific merchant requests using domain separation.
+
+### Domain Tag
+
+```typescript
+const CHALLENGE_DOMAIN_SEPARATOR = 'shielded-x402:v1:challenge';
+const CHALLENGE_DOMAIN_HASH = '0xe32e24a51c351093d339c0035177dc2da5c1b8b9563e414393edd75506dcc055';
+```
+
+The domain hash is the `keccak256` of the domain separator string.
+
+### Preimage Structure
+
+The challenge hash preimage consists of four 32-byte words:
+
+```typescript
+function challengeHashPreimage(
+  challengeNonce: Hex,
+  amount: bigint,
+  merchant: Hex
+): [Hex, Hex, Hex, Hex] {
+  return [
+    CHALLENGE_DOMAIN_HASH,           // Domain separator hash
+    challengeNonce,                  // 32-byte nonce
+    toHexWord(amount),              // Amount as 32-byte word
+    padAddressToWord(merchant)      // Merchant address (padded to 32 bytes)
+  ];
+}
+```
+
+### Challenge Hash Computation
+
+The final challenge hash is:
+
+```typescript
+challengeHash = keccak256(
+  CHALLENGE_DOMAIN_HASH,
+  challengeNonce,
+  toHexWord(amount),
+  padAddressToWord(merchant)
+)
+```
+
+### Example
+
+```typescript
+const challengeNonce = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+const amount = 1000000n;
+const merchant = "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb";
+
+const preimage = challengeHashPreimage(challengeNonce, amount, merchant);
+// [
+//   "0xe32e24a51c351093d339c0035177dc2da5c1b8b9563e414393edd75506dcc055",
+//   "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+//   "0x00000000000000000000000000000000000000000000000000000000000f4240",
+//   "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f0beb"
+// ]
+
+const challengeHash = keccak256(...preimage);
+```
+
+## Nullifier Derivation
+
+Nullifiers prevent double-spending by deriving unique identifiers from spent notes.
+
+### Domain Tag
+
+```typescript
+const NULLIFIER_DOMAIN_SEPARATOR = 'shielded-x402:v1:nullifier';
+```
+
+### Derivation Formula
+
+```typescript
+nullifier = keccak256(nullifierSecret, noteCommitment)
+```
+
+- **nullifierSecret**: Private secret known only to the note owner
+- **noteCommitment**: Public commitment to the note being spent
+
+The protocol enforces that each nullifier can only be used once on-chain.
+
+### Properties
+
+- **Uniqueness**: Each note produces a unique nullifier
+- **Privacy**: Nullifier doesn't reveal note details
+- **Non-malleability**: Only the note owner can derive the correct nullifier
+
+## Commitment Signatures
+
+Output commitments use domain-separated hashing for merchant and change notes.
+
+### Merchant Commitment
+
+**Domain**: `shielded-x402:v1:output`
+
+```typescript
+merchantCommitment = keccak256(payAmount, merchantRho, merchantPkHash)
+```
+
+<ResponseField name="payAmount" type="bigint" required>
+  Amount being paid to merchant
+</ResponseField>
+
+<ResponseField name="merchantRho" type="Hex" required>
+  Random blinding factor for merchant's note (32 bytes)
+</ResponseField>
+
+<ResponseField name="merchantPkHash" type="Hex" required>
+  Hash of merchant's public key (32 bytes)
+</ResponseField>
+
+### Change Commitment
+
+**Domain**: `shielded-x402:v1:output`
+
+```typescript
+changeCommitment = keccak256(changeAmount, changeRho, changePkHash)
+```
+
+<ResponseField name="changeAmount" type="bigint" required>
+  Amount being returned as change
+</ResponseField>
+
+<ResponseField name="changeRho" type="Hex" required>
+  Random blinding factor for change note (32 bytes)
+</ResponseField>
+
+<ResponseField name="changePkHash" type="Hex" required>
+  Hash of sender's public key (32 bytes)
+</ResponseField>
+
+## Header Encoding
+
+X402 headers use base64-encoded JSON for transport.
+
+### Encoding
+
+```typescript
+function encodeX402Header<T>(value: T): string {
+  const json = JSON.stringify(value);
+  return Buffer.from(json, 'utf8').toString('base64');
+}
+```
+
+### Decoding
+
+```typescript
+function decodeX402Header<T>(rawHeader: string): T {
+  const decoded = Buffer.from(rawHeader.trim(), 'base64').toString('utf8');
+  return JSON.parse(decoded) as T;
+}
+```
+
+### Header Types
+
+**PAYMENT-REQUIRED**
+```typescript
+const header = encodeX402Header<X402PaymentRequired>({
+  x402Version: 2,
+  accepts: [requirement]
+});
+```
+
+**PAYMENT-SIGNATURE**
+```typescript
+const header = encodeX402Header<X402PaymentSignaturePayload>({
+  x402Version: 2,
+  accepted: requirement,
+  payload: shieldedPayment,
+  challengeNonce: "0x...",
+  signature: "0x..."
+});
+```
+
+## Verification Steps
+
+### Client Verification
+
+1. Decode `PAYMENT-REQUIRED` header
+2. Validate `x402Version === 2`
+3. Extract `PaymentRequirement`
+4. Compute challenge hash
+5. Generate payment proof
+6. Sign payload
+7. Encode `PAYMENT-SIGNATURE` header
+
+### Merchant Verification
+
+1. Decode `PAYMENT-SIGNATURE` header
+2. Validate `x402Version === 2`
+3. Verify signature over payload
+4. Validate challenge hash matches
+5. Verify ZK proof on-chain
+6. Check nullifier hasn't been used
+7. Accept payment
+
+## Security Properties
+
+- **Domain Separation**: Prevents cross-protocol attacks
+- **Replay Protection**: Challenge nonces prevent replay
+- **Double-Spend Prevention**: Nullifiers enforced on-chain
+- **Binding**: Signatures bind payments to challenges
+- **Privacy**: Zero-knowledge proofs hide payment details

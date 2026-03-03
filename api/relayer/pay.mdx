@@ -1,0 +1,420 @@
+---
+title: "POST /v1/relay/pay"
+description: "Execute a payment authorization by relaying a merchant request"
+---
+
+## Endpoint
+
+```
+POST /v1/relay/pay
+```
+
+## Overview
+
+The relay pay endpoint executes a sequencer-signed authorization by performing the merchant request and reporting the execution result back to the sequencer. It supports multiple payout modes including forwarding requests to merchant endpoints, Solana transfers, and EVM transfers.
+
+## Authentication
+
+<ParamField header="x-relayer-auth-token" type="string">
+  Optional bearer token for authenticating relay callers. Required if `RELAYER_CALLER_AUTH_TOKEN` is configured on the relayer.
+</ParamField>
+
+## Request Body
+
+<ParamField body="authorization" type="object" required>
+  The sequencer-signed authorization for the payment
+  
+  <Expandable title="authorization properties">
+    <ParamField body="version" type="number" required>
+      Authorization version, must be `1`
+    </ParamField>
+    
+    <ParamField body="intentId" type="string" required>
+      32-byte hex hash of the original intent (e.g., `0xabcd...`)
+    </ParamField>
+    
+    <ParamField body="authId" type="string" required>
+      32-byte hex unique identifier for this authorization
+    </ParamField>
+    
+    <ParamField body="authorizedAmountMicros" type="string" required>
+      Amount authorized in micros (e.g., `"1000000"` for 1 unit)
+    </ParamField>
+    
+    <ParamField body="agentId" type="string" required>
+      32-byte hex identifier for the agent making the payment
+    </ParamField>
+    
+    <ParamField body="agentNonce" type="string" required>
+      Sequential nonce for the agent (prevents replay attacks)
+    </ParamField>
+    
+    <ParamField body="merchantId" type="string" required>
+      32-byte hex identifier for the merchant receiving payment
+    </ParamField>
+    
+    <ParamField body="chainRef" type="string" required>
+      Chain reference identifier (e.g., `"base-sepolia"`)
+    </ParamField>
+    
+    <ParamField body="issuedAt" type="string" required>
+      Unix timestamp when authorization was issued
+    </ParamField>
+    
+    <ParamField body="expiresAt" type="string" required>
+      Unix timestamp when authorization expires
+    </ParamField>
+    
+    <ParamField body="sequencerEpochHint" type="string" required>
+      Sequencer epoch hint for commitment tracking
+    </ParamField>
+    
+    <ParamField body="logSeqNo" type="string" required>
+      Log sequence number in the authorization chain
+    </ParamField>
+    
+    <ParamField body="sequencerKeyId" type="string" required>
+      Key ID used by sequencer to sign this authorization
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="sequencerSig" type="string" required>
+  ED25519 signature from the sequencer (64-byte hex, e.g., `0x1234...`)
+</ParamField>
+
+<ParamField body="merchantRequest" type="object" required>
+  The HTTP request to execute for the merchant
+  
+  <Expandable title="merchantRequest properties">
+    <ParamField body="url" type="string" required>
+      HTTPS URL to call (required for `forward` mode)
+    </ParamField>
+    
+    <ParamField body="method" type="string" required>
+      HTTP method (e.g., `GET`, `POST`, `PUT`, `DELETE`)
+    </ParamField>
+    
+    <ParamField body="headers" type="object">
+      Optional HTTP headers as key-value pairs
+    </ParamField>
+    
+    <ParamField body="bodyBase64" type="string">
+      Base64-encoded request body. For `solana` and `evm` modes, contains the chain-specific payload.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Payout Modes
+
+The relayer can operate in different modes configured via `RELAYER_PAYOUT_MODE`:
+
+### forward (default)
+
+Forwards the merchant request to the specified URL and returns the response.
+
+**Requirements:**
+- `merchantRequest.url` must use HTTPS
+- URL cannot resolve to private/internal IPs
+- URL hostname must be in allowlist (if `RELAYER_ALLOWED_HOSTS` is configured)
+
+### noop
+
+Returns a mock success response without making any external calls. Used for testing.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "mode": "noop"
+}
+```
+
+### solana
+
+Executes a Solana payment using the gateway program.
+
+**Body Payload** (in `merchantRequest.bodyBase64`, JSON encoded):
+```json
+{
+  "rpcUrl": "https://api.devnet.solana.com",
+  "wsUrl": "wss://api.devnet.solana.com",
+  "gatewayProgramId": "GATEway...",
+  "verifierProgramId": "VERify...",
+  "stateAccount": "STATE...",
+  "recipient": "RECIPIENT_PUBKEY",
+  "amountLamports": "1000000",
+  "computeUnits": 1000000,
+  "authIdHex": "0xabcd...",
+  "authExpiryUnix": "1234567890",
+  "proofBase64": "...",
+  "publicWitnessBase64": "...",
+  "payerKeypairPath": "/path/to/keypair.json"
+}
+```
+
+**Response includes:**
+- `txSignature`: Solana transaction signature
+
+### evm
+
+Executes an EVM native token transfer.
+
+**Body Payload** (in `merchantRequest.bodyBase64`, JSON encoded):
+```json
+{
+  "rpcUrl": "https://sepolia.base.org",
+  "recipient": "0x1234...",
+  "amountWei": "1000000000000000",
+  "chainId": 84532,
+  "privateKey": "0xabcd..."
+}
+```
+
+**Private Key Priority:**
+1. `payload.privateKey` (if valid)
+2. `RELAYER_EVM_PRIVATE_KEY` environment variable
+
+**Response includes:**
+- `txHash`: EVM transaction hash (0x-prefixed 64-char hex)
+
+## Response
+
+<ResponseField name="executionTxHash" type="string" required>
+  Execution transaction hash. For `solana` mode, this is the transaction signature. For `evm` mode, this is the transaction hash. For `forward` and `noop` modes, this is a derived hash.
+</ResponseField>
+
+<ResponseField name="authId" type="string" required>
+  The authorization ID from the request (32-byte hex)
+</ResponseField>
+
+<ResponseField name="status" type="string" required>
+  Execution status: `DONE` or `FAILED`
+</ResponseField>
+
+<ResponseField name="failureReason" type="string">
+  Present when `status` is `FAILED`. Contains error details.
+</ResponseField>
+
+<ResponseField name="merchantResult" type="object">
+  Present when `status` is `DONE`. Contains the merchant response.
+  
+  <Expandable title="merchantResult properties">
+    <ResponseField name="status" type="number">
+      HTTP status code from the merchant endpoint
+    </ResponseField>
+    
+    <ResponseField name="headers" type="object">
+      Response headers as key-value pairs
+    </ResponseField>
+    
+    <ResponseField name="bodyBase64" type="string">
+      Base64-encoded response body
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Status Codes
+
+- **200 OK**: Payment executed successfully (`status: "DONE"`)
+- **401 Unauthorized**: Invalid or missing `x-relayer-auth-token`
+- **422 Unprocessable Entity**: Payment failed (`status: "FAILED"`)
+- **429 Too Many Requests**: Rate limit exceeded
+
+## Examples
+
+### Forward Mode Example
+
+```bash
+curl -X POST https://relayer.example.com/v1/relay/pay \
+  -H "Content-Type: application/json" \
+  -H "x-relayer-auth-token: your-token" \
+  -d '{
+    "authorization": {
+      "version": 1,
+      "intentId": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+      "authId": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+      "authorizedAmountMicros": "1000000",
+      "agentId": "0x9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba",
+      "agentNonce": "42",
+      "merchantId": "0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "chainRef": "base-sepolia",
+      "issuedAt": "1704067200",
+      "expiresAt": "1704153600",
+      "sequencerEpochHint": "100",
+      "logSeqNo": "5",
+      "sequencerKeyId": "sequencer-key-1"
+    },
+    "sequencerSig": "0xabcd1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+    "merchantRequest": {
+      "url": "https://merchant.example.com/api/payment",
+      "method": "POST",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "bodyBase64": "eyJvcmRlcklkIjogIjEyMzQ1In0="
+    }
+  }'
+```
+
+**Success Response (200 OK):**
+```json
+{
+  "executionTxHash": "0x7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b",
+  "authId": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+  "status": "DONE",
+  "merchantResult": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "bodyBase64": "eyJzdWNjZXNzIjogdHJ1ZX0="
+  }
+}
+```
+
+### Solana Mode Example
+
+```bash
+curl -X POST https://relayer.example.com/v1/relay/pay \
+  -H "Content-Type: application/json" \
+  -d '{
+    "authorization": { ... },
+    "sequencerSig": "0x...",
+    "merchantRequest": {
+      "url": "",
+      "method": "POST",
+      "bodyBase64": "eyJycGNVcmwiOiAiaHR0cHM6Ly9hcGkuZGV2bmV0LnNvbGFuYS5jb20iLCAid3NVcmwiOiAid3NzOi8vYXBpLmRldm5ldC5zb2xhbmEuY29tIiwgImdhdGV3YXlQcm9ncmFtSWQiOiAiR0FURXdheSIsICJ2ZXJpZmllclByb2dyYW1JZCI6ICJWRVJpZnkiLCAic3RhdGVBY2NvdW50IjogIlNUQVRFIiwgInJlY2lwaWVudCI6ICJSRUNJUElFTlQiLCAiYW1vdW50TGFtcG9ydHMiOiAiMTAwMDAwMCIsICJhdXRoSWRIZXgiOiAiMHhhYmNkIiwgImF1dGhFeHBpcnlVbml4IjogIjEyMzQ1Njc4OTAiLCAicHJvb2ZCYXNlNjQiOiAiLi4uIiwgInB1YmxpY1dpdG5lc3NCYXNlNjQiOiAiLi4uIiwgInBheWVyS2V5cGFpclBhdGgiOiAiL3BhdGgvdG8va2V5cGFpci5qc29uIn0="
+    }
+  }'
+```
+
+**Success Response (200 OK):**
+```json
+{
+  "executionTxHash": "5J7X8K9...",
+  "authId": "0xabcdef...",
+  "status": "DONE",
+  "merchantResult": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "bodyBase64": "eyJ0eFNpZ25hdHVyZSI6ICI1Sjd..."
+  }
+}
+```
+
+### EVM Mode Example
+
+```bash
+curl -X POST https://relayer.example.com/v1/relay/pay \
+  -H "Content-Type: application/json" \
+  -d '{
+    "authorization": { ... },
+    "sequencerSig": "0x...",
+    "merchantRequest": {
+      "url": "",
+      "method": "POST",
+      "bodyBase64": "eyJycGNVcmwiOiAiaHR0cHM6Ly9zZXBvbGlhLmJhc2Uub3JnIiwgInJlY2lwaWVudCI6ICIweDEyMzQiLCAiYW1vdW50V2VpIjogIjEwMDAwMDAwMDAwMDAwMDAiLCAiY2hhaW5JZCI6IDg0NTMyfQ=="
+    }
+  }'
+```
+
+**Success Response (200 OK):**
+```json
+{
+  "executionTxHash": "0x7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b",
+  "authId": "0xabcdef...",
+  "status": "DONE",
+  "merchantResult": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "bodyBase64": "eyJ0eEhhc2giOiAiMHg3YThiOWMwZC4uLiJ9"
+  }
+}
+```
+
+### Failure Response (422 Unprocessable Entity)
+
+```json
+{
+  "executionTxHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "authId": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+  "status": "FAILED",
+  "failureReason": "authorization expired"
+}
+```
+
+## Error Handling
+
+Common failure reasons include:
+
+- `"unauthorized caller"` - Invalid or missing auth token
+- `"authorization expired"` - Authorization timestamp is past `expiresAt`
+- `"authorization chainRef mismatch"` - Request chain doesn't match relayer configuration
+- `"invalid sequencer signature"` - Signature verification failed
+- `"unknown sequencer_key_id"` - Sequencer key not in configured key map
+- `"merchant URL must use https"` - Non-HTTPS URL in forward mode
+- `"merchant hostname resolves to private/internal IP"` - Security check failed
+- `"merchant response exceeded max allowed size"` - Response too large
+- `"merchant request timeout"` - Request exceeded configured timeout
+- `"solana payout mode requires merchantRequest.bodyBase64 payload"` - Missing required field
+- `"evm private key unavailable/invalid"` - No valid EVM private key configured
+
+## Security
+
+### URL Validation (Forward Mode)
+
+The relayer enforces strict URL validation:
+
+1. Must use HTTPS protocol
+2. Cannot use `localhost` or `.local` domains
+3. Hostname must be in allowlist (if configured)
+4. DNS resolution cannot point to private IP ranges:
+   - `10.0.0.0/8`
+   - `127.0.0.0/8`
+   - `169.254.0.0/16`
+   - `172.16.0.0/12`
+   - `192.168.0.0/16`
+   - IPv6 loopback and link-local
+
+### Rate Limiting
+
+The relayer implements per-IP rate limiting configurable via `RELAYER_RATE_LIMIT_PER_MINUTE` (default: 180 requests/minute).
+
+### Response Size Limits
+
+Merchant responses are limited to `RELAYER_MAX_RESPONSE_BYTES` (default: 1MB) to prevent memory exhaustion.
+
+### Signature Verification
+
+All requests must include a valid ED25519 signature from a known sequencer public key configured in `RELAYER_SEQUENCER_KEYS_JSON`.
+
+## Execution Reporting
+
+After executing the merchant request, the relayer automatically reports the execution result to the sequencer via `POST /v1/credit/executions`. The report includes:
+
+- Execution transaction hash
+- Success/failure status
+- ED25519 signature from the relayer's private key
+
+The relayer retries failed reports up to 3 times with exponential backoff.
+
+## Configuration
+
+Key environment variables:
+
+- `RELAYER_CHAIN_REF` - Chain identifier (required)
+- `RELAYER_SEQUENCER_URL` - Sequencer base URL (required)
+- `RELAYER_PAYOUT_MODE` - One of: `forward`, `noop`, `solana`, `evm` (default: `forward`)
+- `RELAYER_CALLER_AUTH_TOKEN` - Optional bearer token for caller authentication
+- `RELAYER_ALLOWED_HOSTS` - Comma-separated list of allowed merchant hostnames
+- `RELAYER_MERCHANT_TIMEOUT_MS` - Request timeout in milliseconds (default: 5000)
+- `RELAYER_MAX_RESPONSE_BYTES` - Max response size in bytes (default: 1048576)
+- `RELAYER_RATE_LIMIT_PER_MINUTE` - Rate limit per IP (default: 180)
+- `RELAYER_EVM_PRIVATE_KEY` - Private key for EVM mode (required for `evm` mode)
+- `RELAYER_SEQUENCER_KEYS_JSON` - JSON map of sequencer key IDs to public keys (required)
+- `RELAYER_REPORTING_PRIVATE_KEY` - ED25519 private key for signing execution reports (required)

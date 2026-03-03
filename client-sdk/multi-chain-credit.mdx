@@ -1,0 +1,606 @@
+---
+title: 'MultiChainCreditClient'
+description: 'API reference for sequencer-authorized multi-chain credit payments'
+icon: 'coins'
+---
+
+## Overview
+
+The `MultiChainCreditClient` class enables fast credit-based payments across multiple chains (Base, Solana) using sequencer-authorized intents. The sequencer enforces real-time nonce/balance constraints, while per-chain relayers execute payments only after sequencer authorization.
+
+## Constructor
+
+```typescript
+const client = new MultiChainCreditClient(config: MultiChainCreditClientConfig)
+```
+
+<ParamField path="config" type="MultiChainCreditClientConfig" required>
+  Configuration object for the client
+  
+  <Expandable title="properties">
+    <ParamField path="sequencerUrl" type="string" required>
+      Credit sequencer endpoint (e.g., `http://127.0.0.1:3200`)
+    </ParamField>
+    
+    <ParamField path="relayerUrls" type="Record<string, string>" required>
+      Map of chain references to relayer URLs
+      
+      ```typescript
+      {
+        'eip155:8453': 'http://127.0.0.1:3100',
+        'solana:devnet': 'http://127.0.0.1:3101'
+      }
+      ```
+    </ParamField>
+    
+    <ParamField path="fetchImpl" type="typeof fetch">
+      Custom fetch implementation (defaults to global `fetch`)
+    </ParamField>
+    
+    <ParamField path="sequencerAdminToken" type="string">
+      Admin token for sequencer operations (required for `adminCredit`)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Methods
+
+### pay
+
+Execute a unified authorize + relay payment flow.
+
+```typescript
+await client.pay(
+  request: UnifiedPayRequestV1
+): Promise<UnifiedPayResultV1>
+```
+
+<ParamField path="request" type="UnifiedPayRequestV1" required>
+  <Expandable title="properties">
+    <ParamField path="chainRef" type="string" required>
+      Chain reference (e.g., `eip155:8453`, `solana:devnet`)
+    </ParamField>
+    
+    <ParamField path="amountMicros" type="string" required>
+      Payment amount in micros (1 micro = 0.000001 USD)
+    </ParamField>
+    
+    <ParamField path="merchant" type="object" required>
+      <Expandable title="properties">
+        <ParamField path="serviceRegistryId" type="string" required>
+          Merchant service registry ID (e.g., `demo/base`)
+        </ParamField>
+        <ParamField path="endpointUrl" type="string" required>
+          Merchant endpoint URL
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    
+    <ParamField path="merchantRequest" type="object" required>
+      <Expandable title="properties">
+        <ParamField path="url" type="string" required>
+          Merchant API URL
+        </ParamField>
+        <ParamField path="method" type="string" required>
+          HTTP method (e.g., `POST`)
+        </ParamField>
+        <ParamField path="headers" type="Record<string, string>" required>
+          HTTP headers
+        </ParamField>
+        <ParamField path="bodyBase64" type="string" required>
+          Base64-encoded request body
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    
+    <ParamField path="agent" type="UnifiedPayAgentContext" required>
+      <Expandable title="properties">
+        <ParamField path="agentId" type="Hex" required>
+          Agent identifier (derived from public key)
+        </ParamField>
+        <ParamField path="agentPubKey" type="Hex" required>
+          Agent public key (e.g., Ed25519 key as hex)
+        </ParamField>
+        <ParamField path="signatureScheme" type="SignatureScheme" required>
+          Signature scheme (e.g., `ed25519-sha256-v1`)
+        </ParamField>
+        <ParamField path="agentNonce" type="string" required>
+          Agent nonce (must be strictly increasing)
+        </ParamField>
+        <ParamField path="signIntent" type="function" required>
+          Function to sign the payment intent
+          
+          ```typescript
+          async (input: {
+            intent: IntentV1;
+            canonicalBytes: Uint8Array;
+            typedData: ReturnType<typeof buildIntentTypedDataPayload>;
+          }) => Promise<Hex> | Hex
+          ```
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    
+    <ParamField path="expiresInSeconds" type="number">
+      Intent expiration in seconds (default: 300)
+    </ParamField>
+    
+    <ParamField path="requestId" type="Hex">
+      Custom request ID (auto-generated if omitted)
+    </ParamField>
+    
+    <ParamField path="serviceHash" type="Hex">
+      Optional service hash for additional binding
+    </ParamField>
+    
+    <ParamField path="memoHash" type="Hex">
+      Optional memo hash
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="UnifiedPayResultV1" type="object">
+  <Expandable title="properties">
+    <ResponseField name="authorize" type="AuthorizeResponseV1">
+      Sequencer authorization response
+      
+      <Expandable title="properties">
+        <ResponseField name="authorization" type="AuthorizationV1">
+          The sequencer-signed authorization
+        </ResponseField>
+        <ResponseField name="sequencerSig" type="Hex">
+          Sequencer signature
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+    
+    <ResponseField name="relay" type="RelayPayResponseV1">
+      Relayer execution response
+      
+      <Expandable title="properties">
+        <ResponseField name="status" type="string">
+          Execution status (e.g., `EXECUTED`)
+        </ResponseField>
+        <ResponseField name="executionTxHash" type="Hex">
+          Onchain transaction hash (if applicable)
+        </ResponseField>
+        <ResponseField name="merchantResponse" type="object">
+          Response from merchant API
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+#### Example
+
+```typescript
+import { MultiChainCreditClient } from '@shielded-x402/client';
+import { normalizeHex, deriveAgentIdFromPubKey } from '@shielded-x402/shared-types';
+import { createHash, sign, createPrivateKey } from 'node:crypto';
+
+const client = new MultiChainCreditClient({
+  sequencerUrl: 'http://127.0.0.1:3200',
+  relayerUrls: {
+    'eip155:8453': 'http://127.0.0.1:3100'
+  }
+});
+
+const agentPubKey = '0x...';
+const agentId = deriveAgentIdFromPubKey(agentPubKey);
+const agentPrivateKeyPem = process.env.AGENT_ED25519_PRIVATE_KEY_PEM;
+
+const result = await client.pay({
+  chainRef: 'eip155:8453',
+  amountMicros: '1500000', // $1.50
+  merchant: {
+    serviceRegistryId: 'demo/base',
+    endpointUrl: 'https://merchant.example/pay'
+  },
+  merchantRequest: {
+    url: 'https://merchant.example/pay',
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    bodyBase64: Buffer.from(JSON.stringify({ orderId: 'o-123' })).toString('base64')
+  },
+  agent: {
+    agentId,
+    agentPubKey,
+    signatureScheme: 'ed25519-sha256-v1',
+    agentNonce: '0',
+    signIntent: async ({ canonicalBytes }) => {
+      const digest = createHash('sha256').update(canonicalBytes).digest();
+      const privateKey = createPrivateKey(agentPrivateKeyPem);
+      return normalizeHex(`0x${sign(null, digest, privateKey).toString('hex')}`);
+    }
+  }
+});
+
+console.log('Auth ID:', result.authorize.authorization.authId);
+console.log('Execution TX:', result.relay.executionTxHash);
+console.log('Status:', result.relay.status);
+```
+
+### authorize
+
+Request sequencer authorization for a payment intent.
+
+```typescript
+await client.authorize(
+  request: AuthorizeRequestV1
+): Promise<AuthorizeResponseV1>
+```
+
+<ParamField path="request" type="AuthorizeRequestV1" required>
+  <Expandable title="properties">
+    <ParamField path="intent" type="IntentV1" required>
+      Payment intent with agent/merchant details
+    </ParamField>
+    <ParamField path="agentSig" type="Hex" required>
+      Agent signature over canonical intent bytes
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="AuthorizeResponseV1" type="object">
+  <Expandable title="properties">
+    <ResponseField name="authorization" type="AuthorizationV1">
+      Sequencer-issued authorization
+    </ResponseField>
+    <ResponseField name="sequencerSig" type="Hex">
+      Sequencer signature
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+#### Example
+
+```typescript
+import {
+  buildIntentTypedDataPayload,
+  canonicalIntentBytes,
+  deriveMerchantId
+} from '@shielded-x402/shared-types';
+
+const intent: IntentV1 = {
+  version: 1,
+  agentId,
+  agentPubKey,
+  signatureScheme: 'ed25519-sha256-v1',
+  agentNonce: '0',
+  amountMicros: '1500000',
+  merchantId: deriveMerchantId({
+    serviceRegistryId: 'demo/base',
+    endpointUrl: 'https://merchant.example/pay'
+  }),
+  requiredChainRef: 'eip155:8453',
+  expiresAt: String(Math.floor(Date.now() / 1000) + 300),
+  requestId: '0x...'
+};
+
+const agentSig = signIntent(intent, privateKey);
+
+const authResponse = await client.authorize({ intent, agentSig });
+console.log('Auth ID:', authResponse.authorization.authId);
+```
+
+### relayPay
+
+Execute a payment via the chain-specific relayer.
+
+```typescript
+await client.relayPay(
+  request: RelayPayRequestV1
+): Promise<RelayPayResponseV1>
+```
+
+<ParamField path="request" type="RelayPayRequestV1" required>
+  <Expandable title="properties">
+    <ParamField path="authorization" type="AuthorizationV1" required>
+      Sequencer-issued authorization
+    </ParamField>
+    <ParamField path="sequencerSig" type="Hex" required>
+      Sequencer signature
+    </ParamField>
+    <ParamField path="merchantRequest" type="object" required>
+      Merchant request details (url, method, headers, bodyBase64)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="RelayPayResponseV1" type="object">
+  <Expandable title="properties">
+    <ResponseField name="status" type="string">
+      Execution status
+    </ResponseField>
+    <ResponseField name="executionTxHash" type="Hex">
+      Transaction hash (if applicable)
+    </ResponseField>
+    <ResponseField name="merchantResponse" type="object">
+      Response from merchant
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### adminCredit
+
+Credit an agent's balance (requires `sequencerAdminToken`).
+
+```typescript
+await client.adminCredit(
+  request: AdminCreditRequestV1
+): Promise<AdminCreditResponseV1>
+```
+
+<ParamField path="request" type="AdminCreditRequestV1" required>
+  <Expandable title="properties">
+    <ParamField path="agentId" type="Hex" required>
+      Agent identifier
+    </ParamField>
+    <ParamField path="amountMicros" type="string" required>
+      Amount to credit in micros
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="AdminCreditResponseV1" type="object">
+  <Expandable title="properties">
+    <ResponseField name="ok" type="boolean">
+      Success indicator
+    </ResponseField>
+    <ResponseField name="agentId" type="Hex">
+      Agent identifier
+    </ResponseField>
+    <ResponseField name="creditedMicros" type="string">
+      Amount credited
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+  `adminCredit` is only for local test/dev environments. Production systems must use shielded settlement (`FundingSignal`) to credit balances.
+</Warning>
+
+#### Example
+
+```typescript
+await client.adminCredit({
+  agentId: '0x1234...',
+  amountMicros: '10000000' // $10.00
+});
+```
+
+### latestCommitment
+
+Fetch the latest commitment epoch metadata.
+
+```typescript
+await client.latestCommitment(): Promise<LatestCommitmentResponseV1>
+```
+
+<ResponseField name="LatestCommitmentResponseV1" type="object">
+  <Expandable title="properties">
+    <ResponseField name="latestEpochId" type="string">
+      Latest epoch identifier
+    </ResponseField>
+    <ResponseField name="root" type="Hex">
+      Merkle root for the epoch
+    </ResponseField>
+    <ResponseField name="count" type="number" optional>
+      Number of authorizations in epoch
+    </ResponseField>
+    <ResponseField name="prevRoot" type="Hex" optional>
+      Previous epoch root
+    </ResponseField>
+    <ResponseField name="sequencerKeyId" type="string" optional>
+      Sequencer key identifier
+    </ResponseField>
+    <ResponseField name="postedAt" type="string | null" optional>
+      Timestamp when posted onchain
+    </ResponseField>
+    <ResponseField name="postedTxHash" type="Hex | null" optional>
+      Transaction hash of onchain commitment
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+#### Example
+
+```typescript
+const latest = await client.latestCommitment();
+console.log('Epoch:', latest.latestEpochId);
+console.log('Root:', latest.root);
+```
+
+### commitmentProof
+
+Fetch the inclusion proof for a specific authorization.
+
+```typescript
+await client.commitmentProof(
+  authId: Hex
+): Promise<InclusionProofV1>
+```
+
+<ParamField path="authId" type="Hex" required>
+  Authorization ID to prove
+</ParamField>
+
+<ResponseField name="InclusionProofV1" type="object">
+  <Expandable title="properties">
+    <ResponseField name="epochId" type="string">
+      Epoch containing the authorization
+    </ResponseField>
+    <ResponseField name="leafHash" type="Hex">
+      Leaf hash in Merkle tree
+    </ResponseField>
+    <ResponseField name="index" type="number">
+      Index in the tree
+    </ResponseField>
+    <ResponseField name="siblings" type="Hex[]">
+      Merkle proof siblings
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+#### Example
+
+```typescript
+const proof = await client.commitmentProof('0xabc123...');
+console.log('Epoch:', proof.epochId);
+console.log('Leaf:', proof.leafHash);
+console.log('Proof siblings:', proof.siblings);
+```
+
+### reclaim
+
+Reclaim an expired or failed authorization.
+
+```typescript
+await client.reclaim(
+  request: ReclaimRequestV1
+): Promise<{ ok: true; authId: Hex }>
+```
+
+<ParamField path="request" type="ReclaimRequestV1" required>
+  <Expandable title="properties">
+    <ParamField path="authId" type="Hex" required>
+      Authorization ID to reclaim
+    </ParamField>
+    <ParamField path="callerType" type="string" required>
+      Caller type (e.g., `sequencer`, `agent`)
+    </ParamField>
+    <ParamField path="requestedAt" type="string" required>
+      Unix timestamp of reclaim request
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+#### Example
+
+```typescript
+await client.reclaim({
+  authId: '0xexpired...',
+  callerType: 'sequencer',
+  requestedAt: String(Math.floor(Date.now() / 1000))
+});
+```
+
+## Multi-Chain Example
+
+Execute payments on both Base and Solana:
+
+```typescript
+const client = new MultiChainCreditClient({
+  sequencerUrl: 'http://127.0.0.1:3200',
+  relayerUrls: {
+    'eip155:8453': 'http://127.0.0.1:3100',
+    'solana:devnet': 'http://127.0.0.1:3101'
+  },
+  sequencerAdminToken: 'change-me'
+});
+
+// Credit agent balance
+await client.adminCredit({
+  agentId,
+  amountMicros: '10000000'
+});
+
+// Base payment
+const baseResult = await client.pay({
+  chainRef: 'eip155:8453',
+  amountMicros: '1500000',
+  merchant: {
+    serviceRegistryId: 'demo/base',
+    endpointUrl: 'https://merchant.base.example/pay'
+  },
+  merchantRequest: { /* ... */ },
+  agent: { agentNonce: '0', /* ... */ }
+});
+
+// Solana payment (nonce incremented)
+const solanaResult = await client.pay({
+  chainRef: 'solana:devnet',
+  amountMicros: '2500000',
+  merchant: {
+    serviceRegistryId: 'demo/solana',
+    endpointUrl: 'https://merchant.solana.example/pay'
+  },
+  merchantRequest: { /* ... */ },
+  agent: { agentNonce: '1', /* ... */ }
+});
+
+console.log('Base TX:', baseResult.relay.executionTxHash);
+console.log('Solana TX:', solanaResult.relay.executionTxHash);
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Nonce Management">
+    Agent nonces must be strictly increasing. Track the current nonce locally:
+    
+    ```typescript
+    let currentNonce = 0;
+    
+    async function executePay(params: UnifiedPayRequestV1) {
+      const result = await client.pay({
+        ...params,
+        agent: {
+          ...params.agent,
+          agentNonce: String(currentNonce++)
+        }
+      });
+      return result;
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Balance Tracking">
+    Track remaining balance after each payment to avoid insufficient balance errors:
+    
+    ```typescript
+    let balance = 10_000_000n; // micros
+    
+    const result = await client.pay({ amountMicros: '1500000', ... });
+    balance -= 1_500_000n;
+    
+    console.log('Remaining balance:', balance);
+    ```
+  </Accordion>
+  
+  <Accordion title="Error Handling">
+    Handle authorization and relay errors separately:
+    
+    ```typescript
+    try {
+      const result = await client.pay(request);
+      console.log('Success:', result.relay.status);
+    } catch (error) {
+      if (error.message.includes('insufficient balance')) {
+        // Top up balance
+      } else if (error.message.includes('nonce')) {
+        // Resync nonce
+      } else {
+        // Other error
+      }
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Commitment Verification">
+    Periodically verify commitments are posted onchain:
+    
+    ```typescript
+    const latest = await client.latestCommitment();
+    if (latest.postedTxHash) {
+      console.log('Committed onchain:', latest.postedTxHash);
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## See Also
+
+- [ShieldedClientSDK](/client-sdk/shielded-client) - Anonymous proof-backed payments
+- [Overview](/client-sdk/overview) - SDK architecture and flows

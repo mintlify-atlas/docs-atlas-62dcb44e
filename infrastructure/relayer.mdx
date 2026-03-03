@@ -1,0 +1,314 @@
+---
+title: 'Payment Relayer'
+description: 'Setup and configuration for chain-bound payment relayers'
+---
+
+The Payment Relayer is a chain-bound service that executes authorized payments on behalf of agents. Each relayer instance is tied to a specific blockchain and validates authorizations from the credit sequencer before executing transactions.
+
+## Overview
+
+The relayer runtime supports:
+
+1. **Authorization Validation** - Verify signed authorizations from the sequencer
+2. **Chain Enforcement** - Each relayer instance bound to a specific `chainRef` (CAIP-2)
+3. **Payment Execution** - Execute payments on the target chain
+4. **Execution Reporting** - Send signed execution reports back to the sequencer
+
+<Note>
+Legacy `/v1/relay/credit/*` routes have been removed. Use `/v1/relay/pay` with sequencer authorizations.
+</Note>
+
+## Installation
+
+From the monorepo root:
+
+```bash
+pnpm relayer:dev
+```
+
+## Required Configuration
+
+<ParamField path="RELAYER_CHAIN_REF" type="string" required>
+  CAIP-2 chain reference that this relayer instance will operate on.
+  
+  Examples:
+  - `eip155:84532` (Base Sepolia)
+  - `eip155:8453` (Base Mainnet)
+  - `solana:devnet` (Solana Devnet)
+</ParamField>
+
+<ParamField path="RELAYER_SEQUENCER_URL" type="string" required>
+  Base URL of the credit sequencer service.
+  
+  Example: `https://sequencer.example.com`
+</ParamField>
+
+<ParamField path="RELAYER_SEQUENCER_KEYS_JSON" type="string" required>
+  JSON map of sequencer public keys for verifying authorization signatures.
+  
+  Example:
+  ```json
+  {
+    "seq-key-1": "0x<ed25519-pubkey-32-bytes>"
+  }
+  ```
+</ParamField>
+
+<ParamField path="RELAYER_REPORTING_PRIVATE_KEY" type="string" required>
+  Ed25519 private key for signing execution reports. Accepts either 32-byte seed or 64-byte key as hex.
+  
+  Example: `0x1234567890abcdef...`
+</ParamField>
+
+<ParamField path="RELAYER_KEY_ID" type="string" required>
+  Logical identifier for this relayer's key, sent to sequencer in execution reports.
+  
+  Example: `rel-base-prod-1`
+</ParamField>
+
+## Optional Configuration
+
+<ParamField path="RELAYER_PORT" type="number" default="3100">
+  HTTP port for the relayer service.
+</ParamField>
+
+<ParamField path="RELAYER_PAYOUT_MODE" type="string" default="forward">
+  Payout execution mode. Options:
+  - `forward` - Forward request to merchant endpoint
+  - `noop` - No-op mode for testing (no actual payment)
+  - `solana` - Direct Solana on-chain execution
+  - `evm` - Direct EVM on-chain execution
+</ParamField>
+
+<ParamField path="RELAYER_PAYOUT_HEADERS_JSON" type="string">
+  JSON object of static HTTP headers to include in outbound merchant requests (forward mode).
+  
+  Example: `{"X-API-Key": "secret"}`
+</ParamField>
+
+<ParamField path="RELAYER_ALLOWED_HOSTS" type="string">
+  Comma-separated allowlist of hosts for forward mode security.
+  
+  Example: `merchant1.com,merchant2.com`
+</ParamField>
+
+<ParamField path="RELAYER_MERCHANT_TIMEOUT_MS" type="number" default="5000">
+  Timeout for merchant HTTP requests in milliseconds.
+</ParamField>
+
+<ParamField path="RELAYER_MAX_RESPONSE_BYTES" type="number" default="1048576">
+  Maximum response body size from merchant (1 MB default).
+</ParamField>
+
+<ParamField path="RELAYER_RATE_LIMIT_PER_MINUTE" type="number" default="180">
+  Rate limit for `/v1/relay/pay` endpoint (requests per minute).
+</ParamField>
+
+<ParamField path="RELAYER_CALLER_AUTH_TOKEN" type="string">
+  Optional authentication token. When set, `/v1/relay/pay` requires `x-relayer-auth-token` header.
+</ParamField>
+
+<ParamField path="RELAYER_EVM_PRIVATE_KEY" type="string">
+  Optional fallback private key for EVM payout mode. Can be overridden per-request.
+</ParamField>
+
+## Payout Modes
+
+### Forward Mode
+
+Forwards the payment request to a merchant-specified endpoint:
+
+```bash
+RELAYER_PAYOUT_MODE=forward
+RELAYER_ALLOWED_HOSTS=merchant.example.com
+RELAYER_PAYOUT_HEADERS_JSON='{"Authorization": "Bearer token"}'
+```
+
+### No-op Mode (Testing)
+
+For local smoke tests without actual chain execution:
+
+```bash
+RELAYER_CHAIN_REF=eip155:8453
+RELAYER_PAYOUT_MODE=noop
+```
+
+### Solana Mode
+
+Direct Solana on-chain payment execution. The `merchantRequest.bodyBase64` must contain:
+
+<ParamField path="rpcUrl" type="string" required>
+  Solana RPC endpoint URL.
+</ParamField>
+
+<ParamField path="wsUrl" type="string" required>
+  Solana WebSocket endpoint URL.
+</ParamField>
+
+<ParamField path="gatewayProgramId" type="string" required>
+  Solana gateway program ID.
+</ParamField>
+
+<ParamField path="verifierProgramId" type="string" required>
+  Solana verifier program ID.
+</ParamField>
+
+<ParamField path="stateAccount" type="string" required>
+  Gateway state PDA (Program Derived Address).
+</ParamField>
+
+<ParamField path="recipient" type="string" required>
+  Recipient Solana public key.
+</ParamField>
+
+<ParamField path="amountLamports" type="number" required>
+  Payment amount in lamports.
+</ParamField>
+
+<ParamField path="authIdHex" type="string" required>
+  Authorization ID as hex string.
+</ParamField>
+
+<ParamField path="authExpiryUnix" type="number" required>
+  Authorization expiry timestamp (Unix).
+</ParamField>
+
+<ParamField path="proofBase64" type="string" required>
+  Zero-knowledge proof encoded as base64.
+</ParamField>
+
+<ParamField path="publicWitnessBase64" type="string" required>
+  Public witness data encoded as base64.
+</ParamField>
+
+<ParamField path="payerKeypairPath" type="string" required>
+  Path to payer keypair file.
+</ParamField>
+
+Example configuration:
+
+```bash
+RELAYER_CHAIN_REF=solana:devnet
+RELAYER_PAYOUT_MODE=solana
+```
+
+### EVM Mode
+
+Direct EVM on-chain payment execution. The `merchantRequest.bodyBase64` must contain:
+
+<ParamField path="rpcUrl" type="string" required>
+  EVM RPC endpoint URL.
+</ParamField>
+
+<ParamField path="recipient" type="string" required>
+  Recipient EVM address (0x...).
+</ParamField>
+
+<ParamField path="amountWei" type="string" required>
+  Payment amount in wei.
+</ParamField>
+
+<ParamField path="chainId" type="number">
+  Optional EVM chain ID.
+</ParamField>
+
+<ParamField path="privateKey" type="string">
+  Optional private key (overrides `RELAYER_EVM_PRIVATE_KEY`).
+</ParamField>
+
+Example configuration:
+
+```bash
+RELAYER_CHAIN_REF=eip155:84532
+RELAYER_PAYOUT_MODE=evm
+RELAYER_EVM_PRIVATE_KEY=0x...
+```
+
+## API Endpoints
+
+### Health & Monitoring
+
+- `GET /health` - Basic health check
+- `GET /health/ready` - Readiness probe
+- `GET /metrics` - Prometheus-compatible metrics
+
+### Payment Execution
+
+- `POST /v1/relay/pay` - Execute an authorized payment
+
+## Configuration Examples
+
+### Base Sepolia Relayer
+
+```bash .env
+# Chain binding
+RELAYER_CHAIN_REF=eip155:84532
+RELAYER_PORT=3100
+
+# Sequencer connection
+RELAYER_SEQUENCER_URL=https://sequencer.shielded.example.com
+RELAYER_SEQUENCER_KEYS_JSON='{"seq-key-1":"0xabcd..."}'
+
+# Relayer identity
+RELAYER_REPORTING_PRIVATE_KEY=0x1234...
+RELAYER_KEY_ID=rel-base-sepolia-1
+
+# Payout configuration
+RELAYER_PAYOUT_MODE=evm
+RELAYER_EVM_PRIVATE_KEY=0x5678...
+
+# Rate limiting
+RELAYER_RATE_LIMIT_PER_MINUTE=180
+```
+
+### Solana Devnet Relayer
+
+```bash .env
+# Chain binding
+RELAYER_CHAIN_REF=solana:devnet
+RELAYER_PORT=3101
+
+# Sequencer connection
+RELAYER_SEQUENCER_URL=https://sequencer.shielded.example.com
+RELAYER_SEQUENCER_KEYS_JSON='{"seq-key-1":"0xabcd..."}'
+
+# Relayer identity
+RELAYER_REPORTING_PRIVATE_KEY=0x9abc...
+RELAYER_KEY_ID=rel-solana-devnet-1
+
+# Payout configuration
+RELAYER_PAYOUT_MODE=solana
+
+# Rate limiting
+RELAYER_RATE_LIMIT_PER_MINUTE=180
+```
+
+### Multi-Relayer Setup
+
+Run multiple relayers for different chains:
+
+```bash
+# Terminal 1: Base relayer
+RELAYER_PORT=3100 RELAYER_CHAIN_REF=eip155:84532 pnpm relayer:dev
+
+# Terminal 2: Solana relayer
+RELAYER_PORT=3101 RELAYER_CHAIN_REF=solana:devnet pnpm relayer:dev
+```
+
+## Security Considerations
+
+1. **Private Key Management** - Store `RELAYER_REPORTING_PRIVATE_KEY` and `RELAYER_EVM_PRIVATE_KEY` securely
+2. **Host Allowlist** - Use `RELAYER_ALLOWED_HOSTS` in forward mode to prevent SSRF attacks
+3. **Authentication** - Set `RELAYER_CALLER_AUTH_TOKEN` for production deployments
+4. **Rate Limiting** - Adjust `RELAYER_RATE_LIMIT_PER_MINUTE` based on capacity
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Credit Sequencer" icon="server" href="/infrastructure/sequencer">
+    Configure the authorization sequencer
+  </Card>
+  <Card title="Deployment Guide" icon="rocket" href="/infrastructure/deployment">
+    Deploy to production
+  </Card>
+</CardGroup>

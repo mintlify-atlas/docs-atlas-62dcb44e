@@ -1,0 +1,323 @@
+---
+title: 'Smart Contracts'
+description: 'Overview of Shielded x402 on-chain contracts'
+---
+
+Shielded x402 uses a suite of smart contracts to enable privacy-preserving payments and credit channel settlements on EVM-compatible chains and Solana.
+
+## Contract Architecture
+
+The protocol consists of three core contracts:
+
+1. **ShieldedPool** - Privacy-preserving deposit and spend pool with Merkle tree
+2. **CreditChannelSettlement** - Off-chain credit channel settlement with challenge periods
+3. **CommitmentRegistryV1** - On-chain audit log for sequencer commitment epochs
+
+## ShieldedPool
+
+The ShieldedPool contract enables privacy-preserving deposits and spends using zero-knowledge proofs.
+
+### Features
+
+- **Deposit** - Deposit ERC20 tokens with a commitment hash
+- **Spend** - Spend from pool with ZK proof (creates merchant + change commitments)
+- **Withdraw** - Merchant can withdraw to an address with challenge verification
+- **Merkle Tree** - 24-level sparse Merkle tree for commitment tracking
+- **Nullifier Tracking** - Prevent double-spending via nullifier registry
+
+### Key Functions
+
+```solidity
+function deposit(uint256 amount, bytes32 commitment) external
+```
+
+Deposit tokens into the shielded pool with a commitment.
+
+- **amount** - Amount of tokens to deposit
+- **commitment** - Keccak256 commitment hash
+- Emits: `Deposited(commitment, index, root, amount)`
+
+```solidity
+function submitSpend(
+    bytes calldata proof,
+    bytes32 nullifier,
+    bytes32 root,
+    bytes32 merchantCommitment,
+    bytes32 changeCommitment,
+    bytes32 challengeHash,
+    uint256 amount
+) external
+```
+
+Submit a spend transaction with ZK proof.
+
+- **proof** - Zero-knowledge proof bytes (Noir/Groth16)
+- **nullifier** - Unique nullifier to prevent double-spending
+- **root** - Historical Merkle root
+- **merchantCommitment** - Commitment for merchant's output
+- **changeCommitment** - Commitment for sender's change
+- **challengeHash** - Challenge hash for withdrawal verification
+- **amount** - Spend amount
+- Emits: `Spent(nullifier, merchantCommitment, changeCommitment, amount, ...)`
+
+```solidity
+function withdraw(bytes32 nullifier, bytes32 challengeNonce, address recipient) external
+```
+
+Withdraw funds to a recipient address after spend.
+
+- **nullifier** - Nullifier from the spend transaction
+- **challengeNonce** - Pre-image of the challenge hash
+- **recipient** - Withdrawal recipient address
+- Emits: `Withdrawn(nullifier, recipient, amount, challengeNonce)`
+
+### Contract Deployment
+
+```solidity
+constructor(address asset_, address verifier_)
+```
+
+- **asset_** - ERC20 token address (e.g., USDC)
+- **verifier_** - Proof verifier contract address
+
+### Constants
+
+- **TREE_DEPTH** - 24 (supports ~16.7M commitments)
+- **SNARK_SCALAR_FIELD** - BN254 scalar field modulus
+
+### Source
+
+`contracts/src/ShieldedPool.sol`
+
+## CreditChannelSettlement
+
+Enables off-chain credit channels with on-chain settlement and challenge periods.
+
+### Features
+
+- **Credit Channels** - Agent-relayer payment channels with escrow
+- **Optimistic Settlement** - Challenge period before final settlement
+- **Dual Signatures** - Both parties must sign state updates (EIP-712)
+- **Challenge Mechanism** - Either party can challenge with a higher sequence number
+
+### Channel Lifecycle
+
+1. **Open** - Relayer opens channel with agent and deposits funds
+2. **Topup** - Relayer can add more funds to existing channel
+3. **Start Close** - Either party submits signed state to begin closing
+4. **Challenge** - Either party can challenge with newer state during challenge period
+5. **Finalize** - After challenge period, funds are distributed according to final state
+
+### Key Functions
+
+```solidity
+function openOrTopup(bytes32 channelId, address agent, uint256 amount) external
+```
+
+Open a new channel or add funds to an existing one.
+
+- **channelId** - Unique channel identifier
+- **agent** - Agent address
+- **amount** - Amount to deposit (from msg.sender = relayer)
+- Emits: `ChannelOpened` or `ChannelToppedUp`
+
+```solidity
+function startClose(SignedCreditState calldata signedState) external
+```
+
+Initiate channel closing with a signed state.
+
+- **signedState** - Dual-signed credit state with agent + relayer signatures
+- Emits: `CloseStarted(channelId, seq, challengeDeadline, available)`
+
+```solidity
+function challengeClose(SignedCreditState calldata signedState) external
+```
+
+Challenge an ongoing close with a higher sequence number.
+
+- **signedState** - Must have `seq > closeSeq`
+- Resets challenge period
+- Emits: `CloseChallenged`
+
+```solidity
+function finalizeClose(bytes32 channelId) external
+```
+
+Finalize channel closure after challenge period expires.
+
+- Distributes funds: `available` to agent, remainder to relayer
+- Emits: `CloseFinalized(channelId, seq, paidToAgent, paidToRelayer)`
+
+### Credit State Structure
+
+```solidity
+struct CreditState {
+    bytes32 channelId;
+    uint64 seq;                  // Monotonic sequence number
+    uint256 available;           // Agent's available balance
+    uint256 cumulativeSpent;     // Total spent by agent
+    bytes32 lastDebitDigest;     // Hash of last debit
+    uint64 updatedAt;            // Timestamp
+    address agentAddress;
+    address relayerAddress;
+}
+```
+
+### Contract Deployment
+
+```solidity
+constructor(address asset_, uint64 challengePeriodSeconds_)
+```
+
+- **asset_** - ERC20 token address
+- **challengePeriodSeconds_** - Challenge period duration (e.g., 86400 for 1 day)
+
+### Signature Scheme
+
+Uses EIP-712 typed structured data hashing:
+
+- **Domain** - `shielded-x402-credit` version `1`
+- **Type** - `CreditState` with all fields
+- **Signatures** - Both agent and relayer must sign the same digest
+
+### Source
+
+`contracts/src/CreditChannelSettlement.sol`
+
+## CommitmentRegistryV1
+
+Audit log for sequencer commitment epochs posted to Base.
+
+### Features
+
+- **Epoch Tracking** - Sequential epoch IDs with commitment roots
+- **Operator Control** - Only sequencer operator can post
+- **Root Chaining** - Each epoch references previous root
+- **Metadata** - Stores commitment count, timestamp, and key ID
+
+### Key Functions
+
+```solidity
+function postCommitment(
+    uint64 epochId,
+    bytes32 root,
+    uint32 count,
+    bytes32 prevRoot,
+    bytes32 sequencerKeyId
+) external
+```
+
+Post a new commitment epoch (sequencer operator only).
+
+- **epochId** - Must be `latestEpochId + 1`
+- **root** - Merkle root of authorization commitments
+- **count** - Number of authorizations in epoch
+- **prevRoot** - Previous epoch root (for chaining)
+- **sequencerKeyId** - Key ID used by sequencer
+- Emits: `CommitmentPosted`
+
+### Commitment Metadata
+
+```solidity
+struct CommitmentMeta {
+    uint32 count;
+    bytes32 prevRoot;
+    uint64 postedAt;
+    bytes32 sequencerKeyId;
+}
+```
+
+### Contract Deployment
+
+```solidity
+constructor(address sequencerOperator_)
+```
+
+- **sequencerOperator_** - Address authorized to post commitments
+
+### Source
+
+`contracts/src/CommitmentRegistryV1.sol`
+
+## Proof Verification
+
+Shielded x402 supports multiple proof verification systems:
+
+### NoirVerifierAdapter
+
+Adapter for Noir/Barretenberg proof system (Groth16).
+
+- **verify(bytes proof, bytes32[] publicInputs)** - Verifies a Noir proof
+- Used by ShieldedPool for spend verification
+- Source: `contracts/src/verifiers/NoirVerifierAdapter.sol`
+
+### MockProofVerifier
+
+Mock verifier for testing that always returns true.
+
+Source: `contracts/src/verifiers/MockProofVerifier.sol`
+
+## Test Utilities
+
+### MockUSDC
+
+ERC20 test token with mint function.
+
+```solidity
+function mint(address to, uint256 amount) external
+```
+
+### MockFeeOnTransferUSDC
+
+ERC20 token that charges a fee on transfer (for testing ShieldedPool fee detection).
+
+### DummyShieldedService
+
+Minimal contract for testing merchant integrations.
+
+## Deployment
+
+### Prerequisites
+
+- Solidity ^0.8.26
+- Foundry or Hardhat
+- ERC20 asset token (e.g., USDC)
+- Deployed proof verifier contract
+
+### Deployment Order
+
+1. Deploy proof verifier (NoirVerifierAdapter or custom)
+2. Deploy ShieldedPool with asset and verifier addresses
+3. Deploy CreditChannelSettlement with asset and challenge period
+4. Deploy CommitmentRegistryV1 with sequencer operator address
+
+### Example (Foundry)
+
+```bash
+# Deploy ShieldedPool
+forge create ShieldedPool \
+  --constructor-args <USDC_ADDRESS> <VERIFIER_ADDRESS> \
+  --private-key <PRIVATE_KEY>
+
+# Deploy CreditChannelSettlement
+forge create CreditChannelSettlement \
+  --constructor-args <USDC_ADDRESS> 86400 \
+  --private-key <PRIVATE_KEY>
+
+# Deploy CommitmentRegistryV1
+forge create CommitmentRegistryV1 \
+  --constructor-args <SEQUENCER_OPERATOR_ADDRESS> \
+  --private-key <PRIVATE_KEY>
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Deployment Guide" icon="rocket" href="/infrastructure/deployment">
+    Full deployment instructions
+  </Card>
+  <Card title="Sequencer Setup" icon="server" href="/infrastructure/sequencer">
+    Configure the credit sequencer
+  </Card>
+</CardGroup>

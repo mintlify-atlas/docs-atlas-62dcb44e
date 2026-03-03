@@ -1,0 +1,264 @@
+---
+title: 'Protocol Data Structures'
+description: 'Core protocol data structures for shielded payments and X402'
+---
+
+## Overview
+
+The protocol defines typed data structures for shielded payments, X402 payment flows, and agent interactions. All structures use strict TypeScript types with hex-encoded values.
+
+## Shielded Note
+
+Represents a private note in the shielded payment system.
+
+<ResponseField name="amount" type="bigint" required>
+  The note's value in the smallest unit of the asset
+</ResponseField>
+
+<ResponseField name="rho" type="Hex" required>
+  Random blinding factor for the commitment (32 bytes, hex-encoded)
+</ResponseField>
+
+<ResponseField name="pkHash" type="Hex" required>
+  Hash of the owner's public key (32 bytes, hex-encoded)
+</ResponseField>
+
+<ResponseField name="commitment" type="Hex" required>
+  The note commitment hash (32 bytes, hex-encoded)
+</ResponseField>
+
+<ResponseField name="leafIndex" type="number" required>
+  Position in the Merkle tree (0-based index)
+</ResponseField>
+
+### Example
+
+```typescript
+const note: ShieldedNote = {
+  amount: 1000000n,
+  rho: "0x1234...",
+  pkHash: "0xabcd...",
+  commitment: "0x5678...",
+  leafIndex: 42
+};
+```
+
+## Spend Public Inputs
+
+Public inputs for zero-knowledge spend proofs.
+
+<ResponseField name="nullifier" type="Hex" required>
+  Unique nullifier preventing double-spends (32 bytes, domain: `shielded-x402:v1:nullifier`)
+</ResponseField>
+
+<ResponseField name="root" type="Hex" required>
+  Merkle root proving note existence (32 bytes, hex-encoded)
+</ResponseField>
+
+<ResponseField name="merchantCommitment" type="Hex" required>
+  Commitment to merchant output (32 bytes, domain: `shielded-x402:v1:output`)
+</ResponseField>
+
+<ResponseField name="changeCommitment" type="Hex" required>
+  Commitment to change output (32 bytes, domain: `shielded-x402:v1:output`)
+</ResponseField>
+
+<ResponseField name="challengeHash" type="Hex" required>
+  Hash binding payment to merchant challenge (32 bytes, domain: `shielded-x402:v1:challenge`)
+</ResponseField>
+
+<ResponseField name="amount" type="bigint" required>
+  Payment amount in smallest unit
+</ResponseField>
+
+## Shielded Payment Response
+
+Complete payment proof package sent to merchants.
+
+<ResponseField name="proof" type="Hex" required>
+  ZK-SNARK proof bytes (hex-encoded)
+</ResponseField>
+
+<ResponseField name="publicInputs" type="Hex[]" required>
+  Array of public inputs (each 32 bytes, hex-encoded)
+</ResponseField>
+
+<ResponseField name="nullifier" type="Hex" required>
+  The nullifier from public inputs (32 bytes)
+</ResponseField>
+
+<ResponseField name="root" type="Hex" required>
+  Merkle root from public inputs (32 bytes)
+</ResponseField>
+
+<ResponseField name="merchantCommitment" type="Hex" required>
+  Merchant output commitment (32 bytes)
+</ResponseField>
+
+<ResponseField name="changeCommitment" type="Hex" required>
+  Change output commitment (32 bytes)
+</ResponseField>
+
+<ResponseField name="challengeHash" type="Hex" required>
+  Challenge hash from public inputs (32 bytes)
+</ResponseField>
+
+<ResponseField name="encryptedReceipt" type="Hex" required>
+  Encrypted payment receipt for the merchant (hex-encoded)
+</ResponseField>
+
+<ResponseField name="txHint" type="string">
+  Optional transaction hint for off-chain coordination
+</ResponseField>
+
+### Example
+
+```typescript
+const payment: ShieldedPaymentResponse = {
+  proof: "0x1234...",
+  publicInputs: ["0xabc...", "0xdef..."],
+  nullifier: "0x5678...",
+  root: "0x9abc...",
+  merchantCommitment: "0xdef0...",
+  changeCommitment: "0x1234...",
+  challengeHash: "0x5678...",
+  encryptedReceipt: "0x9abc...",
+  txHint: "batch-42"
+};
+```
+
+## Payment Requirement
+
+X402 payment requirement structure for merchant challenges.
+
+<ResponseField name="x402Version" type="2">
+  Protocol version (always 2)
+</ResponseField>
+
+<ResponseField name="scheme" type="string" required>
+  Payment scheme, typically `"exact"`
+</ResponseField>
+
+<ResponseField name="network" type="string" required>
+  Target blockchain network identifier
+</ResponseField>
+
+<ResponseField name="asset" type="Hex | string" required>
+  Asset contract address or identifier
+</ResponseField>
+
+<ResponseField name="payTo" type="Hex" required>
+  Merchant's payment recipient address (20 bytes)
+</ResponseField>
+
+<ResponseField name="rail" type="string" required>
+  Payment rail, typically `"shielded-usdc"`
+</ResponseField>
+
+<ResponseField name="amount" type="string" required>
+  Payment amount as decimal string
+</ResponseField>
+
+<ResponseField name="challengeNonce" type="string" required>
+  Unique challenge nonce (32 bytes, hex-encoded)
+</ResponseField>
+
+<ResponseField name="challengeExpiry" type="string" required>
+  Challenge expiration timestamp (ISO 8601 or Unix timestamp)
+</ResponseField>
+
+<ResponseField name="merchantPubKey" type="Hex" required>
+  Merchant's public key for encryption (hex-encoded)
+</ResponseField>
+
+<ResponseField name="verifyingContract" type="Hex" required>
+  Contract address for proof verification (20 bytes)
+</ResponseField>
+
+<ResponseField name="maxTimeoutSeconds" type="number">
+  Maximum timeout for payment completion
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  Human-readable payment description
+</ResponseField>
+
+<ResponseField name="mimeType" type="string">
+  MIME type of the expected response
+</ResponseField>
+
+<ResponseField name="outputSchema" type="string">
+  JSON schema for response validation
+</ResponseField>
+
+<ResponseField name="extra" type="Record<string, string>">
+  Additional metadata, includes shielded rail parameters
+</ResponseField>
+
+## X402 Payment Signature Payload
+
+Complete X402 payment package with signature.
+
+<ResponseField name="x402Version" type="2" required>
+  Protocol version (always 2)
+</ResponseField>
+
+<ResponseField name="accepted" type="PaymentRequirement" required>
+  The payment requirement being fulfilled
+</ResponseField>
+
+<ResponseField name="payload" type="ShieldedPaymentResponse" required>
+  The shielded payment proof and data
+</ResponseField>
+
+<ResponseField name="challengeNonce" type="Hex" required>
+  Challenge nonce from the requirement (32 bytes)
+</ResponseField>
+
+<ResponseField name="signature" type="Hex" required>
+  Cryptographic signature over the payload (hex-encoded)
+</ResponseField>
+
+## Relayer Settlement Delta
+
+State update from relayer after settlement.
+
+<ResponseField name="merchantCommitment" type="Hex" required>
+  Merchant's new note commitment (32 bytes)
+</ResponseField>
+
+<ResponseField name="changeCommitment" type="Hex" required>
+  Sender's change note commitment (32 bytes)
+</ResponseField>
+
+<ResponseField name="merchantLeafIndex" type="number">
+  Merchant note position in Merkle tree
+</ResponseField>
+
+<ResponseField name="changeLeafIndex" type="number">
+  Change note position in Merkle tree
+</ResponseField>
+
+<ResponseField name="newRoot" type="Hex">
+  Updated Merkle root after insertion (32 bytes)
+</ResponseField>
+
+## Hex Type
+
+All hex-encoded values use the `Hex` type:
+
+```typescript
+type Hex = `0x${string}`;
+```
+
+### Validation
+
+- **isHex**: Validates `0x`-prefixed hex strings of any length
+- **isHex32**: Validates exactly 32-byte (64 hex characters) values
+
+### Canonical Format
+
+- Always lowercase
+- Always prefixed with `0x`
+- 32-byte values padded to 64 hex characters
+- Addresses padded to 64 characters (40 → 64) for word alignment

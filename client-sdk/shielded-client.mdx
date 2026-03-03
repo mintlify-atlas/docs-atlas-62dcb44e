@@ -1,0 +1,504 @@
+---
+title: 'ShieldedClientSDK'
+description: 'API reference for the ShieldedClientSDK class'
+icon: 'shield-halved'
+---
+
+## Overview
+
+The `ShieldedClientSDK` class handles anonymous proof-backed x402 payment payload construction. It manages deposits, spending proofs, and zero-knowledge proof generation for privacy-preserving payments.
+
+## Constructor
+
+```typescript
+const sdk = new ShieldedClientSDK(config: ShieldedClientConfig)
+```
+
+<ParamField path="config" type="ShieldedClientConfig" required>
+  Configuration object for the SDK
+  
+  <Expandable title="properties">
+    <ParamField path="endpoint" type="string" required>
+      Relayer endpoint URL
+    </ParamField>
+    
+    <ParamField path="signer" type="(message: string) => Promise<string>" required>
+      Function to sign payment payloads (typically wallet.signMessage)
+    </ParamField>
+    
+    <ParamField path="depositFn" type="(amount: bigint, commitment: Hex) => Promise<{ txHash: Hex; leafIndex: number }>">
+      Optional function to execute onchain deposits
+    </ParamField>
+    
+    <ParamField path="proofProvider" type="ProofProvider">
+      Optional zero-knowledge proof provider for generating real Noir proofs. See [Proof Generation](/client-sdk/shielded-client#proof-generation)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Methods
+
+### deposit
+
+Create a new shielded note and optionally deposit onchain.
+
+```typescript
+await sdk.deposit(
+  amount: bigint,
+  ownerPkHash: Hex
+): Promise<{ note: ShieldedNote; txHash?: Hex; leafIndex: number }>
+```
+
+<ParamField path="amount" type="bigint" required>
+  Amount to deposit (in smallest denomination)
+</ParamField>
+
+<ParamField path="ownerPkHash" type="Hex" required>
+  Hash of the owner's public key (BN254 field element)
+</ParamField>
+
+<ResponseField name="note" type="ShieldedNote">
+  The created shielded note
+  
+  <Expandable title="properties">
+    <ResponseField name="amount" type="bigint">
+      Note amount
+    </ResponseField>
+    <ResponseField name="rho" type="Hex">
+      Random blinding factor
+    </ResponseField>
+    <ResponseField name="pkHash" type="Hex">
+      Owner public key hash
+    </ResponseField>
+    <ResponseField name="commitment" type="Hex">
+      Note commitment (derived from amount, rho, pkHash)
+    </ResponseField>
+    <ResponseField name="leafIndex" type="number">
+      Position in Merkle tree (-1 if not yet inserted)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="txHash" type="Hex" optional>
+  Transaction hash if depositFn was provided and executed
+</ResponseField>
+
+<ResponseField name="leafIndex" type="number">
+  Index in the Merkle tree
+</ResponseField>
+
+#### Example
+
+```typescript
+const { note, txHash } = await sdk.deposit(
+  100_000_000n, // 100 USDC (6 decimals)
+  '0x1234...' // owner pkHash
+);
+
+console.log('Note commitment:', note.commitment);
+console.log('Leaf index:', note.leafIndex);
+```
+
+### buildSpendProof
+
+Build a spend proof bundle without generating the actual zero-knowledge proof (placeholder proof `0x00`).
+
+```typescript
+sdk.buildSpendProof(
+  params: SpendBuildParams
+): SpendProofBundle
+```
+
+<ParamField path="params" type="SpendBuildParams" required>
+  Parameters for building the spend proof
+  
+  <Expandable title="properties">
+    <ParamField path="note" type="ShieldedNote" required>
+      Note to spend
+    </ParamField>
+    
+    <ParamField path="witness" type="MerkleWitness" required>
+      Merkle witness proving note inclusion
+    </ParamField>
+    
+    <ParamField path="nullifierSecret" type="Hex" required>
+      Secret used to derive the nullifier (prevent double-spend)
+    </ParamField>
+    
+    <ParamField path="merchantPubKey" type="Hex" required>
+      Merchant's public key hash (BN254 field element)
+    </ParamField>
+    
+    <ParamField path="merchantAddress" type="Hex" required>
+      Merchant's Ethereum address
+    </ParamField>
+    
+    <ParamField path="amount" type="bigint" required>
+      Amount to pay (must be ≤ note.amount)
+    </ParamField>
+    
+    <ParamField path="challengeNonce" type="Hex" required>
+      Challenge nonce from 402 response
+    </ParamField>
+    
+    <ParamField path="encryptedReceipt" type="Hex" required>
+      Encrypted receipt data (can be '0x')
+    </ParamField>
+    
+    <ParamField path="merchantRho" type="Hex">
+      Blinding factor for merchant note (auto-generated if omitted)
+    </ParamField>
+    
+    <ParamField path="changeRho" type="Hex">
+      Blinding factor for change note (auto-generated if omitted)
+    </ParamField>
+    
+    <ParamField path="changeNullifierSecret" type="Hex">
+      Nullifier secret for change note (auto-generated if omitted)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="SpendProofBundle" type="object">
+  <Expandable title="properties">
+    <ResponseField name="response" type="ShieldedPaymentResponse">
+      Payment response with proof and public inputs
+    </ResponseField>
+    <ResponseField name="changeNote" type="ShieldedNote">
+      Change note returned to spender
+    </ResponseField>
+    <ResponseField name="changeNullifierSecret" type="Hex">
+      Nullifier secret for the change note (store this!)
+    </ResponseField>
+    <ResponseField name="merchantRho" type="Hex">
+      Blinding factor used for merchant note
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### buildSpendProofWithProvider
+
+Build a spend proof bundle and generate the actual zero-knowledge proof using the configured `proofProvider`.
+
+```typescript
+await sdk.buildSpendProofWithProvider(
+  params: SpendBuildParams
+): Promise<SpendProofBundle>
+```
+
+Parameters and return type are identical to `buildSpendProof`, but the returned `proof` field will contain a real zero-knowledge proof instead of `0x00`.
+
+#### Example
+
+```typescript
+const bundle = await sdk.buildSpendProofWithProvider({
+  note,
+  witness,
+  nullifierSecret: '0xabc...',
+  merchantPubKey: '0x1234...',
+  merchantAddress: '0x5678...',
+  amount: 40_000_000n,
+  challengeNonce: '0x9999...',
+  encryptedReceipt: '0x'
+});
+
+console.log('Proof:', bundle.response.proof);
+console.log('Change amount:', bundle.changeNote.amount);
+```
+
+### prepare402Payment
+
+Prepare a complete 402 payment including proof generation and signature.
+
+```typescript
+await sdk.prepare402Payment(
+  requirement: PaymentRequirement,
+  note: ShieldedNote,
+  witness: MerkleWitness,
+  nullifierSecret: Hex,
+  baseHeaders?: HeadersInit
+): Promise<Prepared402Payment>
+```
+
+<ParamField path="requirement" type="PaymentRequirement" required>
+  Payment requirement from 402 response (parsed from `X-Payment-Required` header)
+</ParamField>
+
+<ParamField path="note" type="ShieldedNote" required>
+  Note to spend
+</ParamField>
+
+<ParamField path="witness" type="MerkleWitness" required>
+  Merkle witness for the note
+</ParamField>
+
+<ParamField path="nullifierSecret" type="Hex" required>
+  Nullifier secret for the note
+</ParamField>
+
+<ParamField path="baseHeaders" type="HeadersInit">
+  Optional base headers to include in the payment request
+</ParamField>
+
+<ResponseField name="Prepared402Payment" type="object">
+  <Expandable title="properties">
+    <ResponseField name="requirement" type="PaymentRequirement">
+      Original payment requirement
+    </ResponseField>
+    <ResponseField name="headers" type="Headers">
+      Headers with `X-Payment-Signature` added
+    </ResponseField>
+    <ResponseField name="response" type="ShieldedPaymentResponse">
+      Payment response with proof
+    </ResponseField>
+    <ResponseField name="changeNote" type="ShieldedNote">
+      Change note to store locally
+    </ResponseField>
+    <ResponseField name="changeNullifierSecret" type="Hex">
+      Nullifier secret for change note (store this!)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+#### Example
+
+```typescript
+const prepared = await sdk.prepare402Payment(
+  requirement,
+  note,
+  witness,
+  nullifierSecret,
+  { 'User-Agent': 'MyAgent/1.0' }
+);
+
+// Use prepared.headers in retry request
+const response = await fetch(url, {
+  headers: prepared.headers
+});
+```
+
+### pay402
+
+Sign a payment response and generate the `X-Payment-Signature` header.
+
+```typescript
+await sdk.pay402(
+  paymentResponse: ShieldedPaymentResponse,
+  requirement: PaymentRequirement,
+  challengeNonce: Hex
+): Promise<{
+  payload: string;
+  signature: string;
+  paymentSignatureHeader: string;
+}>
+```
+
+<ParamField path="paymentResponse" type="ShieldedPaymentResponse" required>
+  The payment response containing proof and public inputs
+</ParamField>
+
+<ParamField path="requirement" type="PaymentRequirement" required>
+  Original payment requirement
+</ParamField>
+
+<ParamField path="challengeNonce" type="Hex" required>
+  Challenge nonce from the requirement
+</ParamField>
+
+<ResponseField name="payload" type="string">
+  JSON-stringified payment response
+</ResponseField>
+
+<ResponseField name="signature" type="string">
+  Signature of the payload
+</ResponseField>
+
+<ResponseField name="paymentSignatureHeader" type="string">
+  Complete `X-Payment-Signature` header value
+</ResponseField>
+
+## Utility Functions
+
+### buildWitnessFromCommitments
+
+Derive a Merkle witness from a list of commitments.
+
+```typescript
+import { buildWitnessFromCommitments } from '@shielded-x402/client';
+
+const witness = buildWitnessFromCommitments(
+  commitments: Hex[],
+  targetIndex: number
+): MerkleWitness
+```
+
+<ParamField path="commitments" type="Hex[]" required>
+  Array of commitment hashes in tree order
+</ParamField>
+
+<ParamField path="targetIndex" type="number" required>
+  Index of the note to prove (0-based)
+</ParamField>
+
+<ResponseField name="MerkleWitness" type="object">
+  <Expandable title="properties">
+    <ResponseField name="root" type="Hex">
+      Merkle root hash
+    </ResponseField>
+    <ResponseField name="path" type="Hex[]">
+      Sibling hashes from leaf to root
+    </ResponseField>
+    <ResponseField name="indexBits" type="number[]">
+      Binary path (0 = left, 1 = right)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+#### Example
+
+```typescript
+const commitments = noteStore.getCommitments();
+const witness = buildWitnessFromCommitments(commitments, note.leafIndex);
+```
+
+## Proof Generation
+
+### Using a ProofProvider
+
+To generate real zero-knowledge proofs, configure a `ProofProvider`:
+
+```typescript
+import { createProofProvider } from '@shielded-x402/client';
+
+// Create proof provider (loads bundled circuit)
+const proofProvider = await createProofProvider();
+
+const sdk = new ShieldedClientSDK({
+  endpoint: RELAYER_URL,
+  signer: async (message) => account.signMessage({ message }),
+  proofProvider
+});
+```
+
+### Custom Circuit
+
+Load a custom Noir circuit artifact:
+
+```typescript
+import { createNoirJsProofProviderFromCircuit } from '@shielded-x402/client';
+import circuit from './my-circuit.json';
+
+const proofProvider = await createNoirJsProofProviderFromCircuit(circuit, {
+  backendProofOptions: { verifierTarget: 'evm' }
+});
+```
+
+### Low-Level ProofProvider
+
+Implement a custom proof provider:
+
+```typescript
+import { createNoirJsProofProvider } from '@shielded-x402/client';
+import { Noir } from '@noir-lang/noir_js';
+import { UltraHonkBackend } from '@aztec/bb.js';
+
+const noir = new Noir(circuit);
+const backend = new UltraHonkBackend(circuit.bytecode);
+
+const proofProvider = createNoirJsProofProvider({
+  noir,
+  backend,
+  enforcePublicInputsMatch: true
+});
+```
+
+## Type Definitions
+
+### ShieldedNote
+
+```typescript
+interface ShieldedNote {
+  amount: bigint;
+  rho: Hex;              // Random blinding factor
+  pkHash: Hex;           // Owner public key hash
+  commitment: Hex;       // Commitment = H(amount, rho, pkHash)
+  leafIndex: number;     // Position in Merkle tree
+}
+```
+
+### MerkleWitness
+
+```typescript
+interface MerkleWitness {
+  root: Hex;             // Merkle root
+  path: Hex[];           // Sibling hashes
+  indexBits: number[];   // Binary path (0/1)
+}
+```
+
+### ShieldedPaymentResponse
+
+```typescript
+interface ShieldedPaymentResponse {
+  proof: Hex;                    // Zero-knowledge proof
+  publicInputs: Hex[];           // [nullifier, root, merchantCommitment, changeCommitment, challengeHash, amount]
+  nullifier: Hex;                // Note nullifier (prevents double-spend)
+  root: Hex;                     // Merkle root
+  merchantCommitment: Hex;       // Commitment for merchant note
+  changeCommitment: Hex;         // Commitment for change note
+  challengeHash: Hex;            // Hash of challenge parameters
+  encryptedReceipt: Hex;         // Encrypted receipt data
+  txHint: string;                // Transaction hint (e.g., 'leaf:0')
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Securely Store Nullifier Secrets">
+    Nullifier secrets are critical for spending notes. Store them encrypted alongside note commitments in a secure wallet or database.
+    
+    ```typescript
+    const nullifierSecretsByCommitment = new Map<string, Hex>();
+    nullifierSecretsByCommitment.set(note.commitment, changeNullifierSecret);
+    ```
+  </Accordion>
+  
+  <Accordion title="Track Change Notes">
+    After each spend, store the returned change note and its nullifier secret for future transactions.
+    
+    ```typescript
+    const prepared = await sdk.prepare402Payment(...);
+    noteStore.ingestSpend({
+      merchantCommitment: prepared.response.merchantCommitment,
+      changeCommitment: prepared.response.changeCommitment
+    });
+    nullifierSecrets.set(
+      prepared.changeNote.commitment,
+      prepared.changeNullifierSecret
+    );
+    ```
+  </Accordion>
+  
+  <Accordion title="Verify Proof Provider Outputs">
+    The SDK enforces public input matching by default. Disable only if you trust the proof provider:
+    
+    ```typescript
+    const provider = createNoirJsProofProvider({
+      noir,
+      backend,
+      enforcePublicInputsMatch: false // Not recommended
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Handle BN254 Field Constraints">
+    All random values (rho, nullifierSecret) are automatically generated within the BN254 field modulus. When providing custom values, ensure they are < 21888242871839275222246405745257275088548364400416034343698204186575808495617n.
+  </Accordion>
+</AccordionGroup>
+
+## See Also
+
+- [MultiChainCreditClient](/client-sdk/multi-chain-credit) - Fast credit-based payments
+- [createShieldedFetch](/client-sdk/shielded-fetch) - Automatic 402 handling
+- [Note Management](/client-sdk/note-management) - Local note indexing

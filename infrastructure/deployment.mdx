@@ -1,0 +1,470 @@
+---
+title: 'Deployment Guide'
+description: 'End-to-end deployment guide for Shielded x402 infrastructure'
+---
+
+This guide walks through deploying a complete Shielded x402 infrastructure, including smart contracts, credit sequencer, and payment relayers.
+
+## Architecture Overview
+
+A production Shielded x402 deployment consists of:
+
+1. **Smart Contracts** - ShieldedPool, CreditChannelSettlement, CommitmentRegistryV1 (EVM)
+2. **Credit Sequencer** - Authoritative service for credit authorization
+3. **Payment Relayers** - Chain-bound services (one per chain)
+4. **Database** - PostgreSQL for sequencer state
+
+## Prerequisites
+
+### Software Requirements
+
+- Node.js 18+ and pnpm
+- PostgreSQL 14+
+- Foundry (for contract deployment)
+- Git
+
+### Infrastructure Requirements
+
+- EVM RPC endpoint (Base Sepolia or mainnet)
+- Solana RPC endpoint (optional, for Solana support)
+- PostgreSQL database server
+- Application hosting (e.g., Railway, Fly.io, AWS)
+
+### Key Material
+
+Generate Ed25519 keys for:
+
+- Sequencer signing key
+- Each relayer reporting key
+
+Generate ECDSA keys for:
+
+- Contract deployment
+- Base commitment poster (if using registry)
+- EVM relayer execution (if using EVM mode)
+
+## Step 1: Clone and Install
+
+Clone the monorepo and install dependencies:
+
+```bash
+git clone https://github.com/your-org/shielded-x402.git
+cd shielded-x402
+pnpm install
+```
+
+## Step 2: Deploy Smart Contracts
+
+### 2.1 Configure Environment
+
+Create `contracts/.env`:
+
+```bash
+RPC_URL=https://sepolia.base.org
+PRIVATE_KEY=0x...
+USDC_ADDRESS=0x036CbD53842c5426634e7929541eC2318f3dCF7e  # Base Sepolia USDC
+```
+
+### 2.2 Deploy Contracts
+
+Deploy in the following order:
+
+```bash
+cd contracts
+
+# 1. Deploy proof verifier
+forge create src/verifiers/NoirVerifierAdapter.sol:NoirVerifierAdapter \
+  --private-key $PRIVATE_KEY \
+  --rpc-url $RPC_URL
+
+# Note the deployed address: VERIFIER_ADDRESS=0x...
+
+# 2. Deploy ShieldedPool
+forge create src/ShieldedPool.sol:ShieldedPool \
+  --constructor-args $USDC_ADDRESS $VERIFIER_ADDRESS \
+  --private-key $PRIVATE_KEY \
+  --rpc-url $RPC_URL
+
+# Note the deployed address: SHIELDED_POOL_ADDRESS=0x...
+
+# 3. Deploy CreditChannelSettlement (1 day challenge period)
+forge create src/CreditChannelSettlement.sol:CreditChannelSettlement \
+  --constructor-args $USDC_ADDRESS 86400 \
+  --private-key $PRIVATE_KEY \
+  --rpc-url $RPC_URL
+
+# Note the deployed address: SETTLEMENT_ADDRESS=0x...
+
+# 4. Deploy CommitmentRegistryV1
+forge create src/CommitmentRegistryV1.sol:CommitmentRegistryV1 \
+  --constructor-args $SEQUENCER_OPERATOR_ADDRESS \
+  --private-key $PRIVATE_KEY \
+  --rpc-url $RPC_URL
+
+# Note the deployed address: REGISTRY_ADDRESS=0x...
+```
+
+### 2.3 Verify Contracts (Optional)
+
+```bash
+forge verify-contract \
+  --chain-id 84532 \
+  --constructor-args $(cast abi-encode "constructor(address,address)" $USDC_ADDRESS $VERIFIER_ADDRESS) \
+  $SHIELDED_POOL_ADDRESS \
+  src/ShieldedPool.sol:ShieldedPool
+```
+
+## Step 3: Setup Database
+
+### 3.1 Create Database
+
+```bash
+psql -U postgres
+```
+
+```sql
+CREATE DATABASE sequencer_production;
+CREATE USER sequencer WITH PASSWORD 'secure_password';
+GRANT ALL PRIVILEGES ON DATABASE sequencer_production TO sequencer;
+```
+
+### 3.2 Run Migrations
+
+From the monorepo root:
+
+```bash
+export SEQUENCER_DATABASE_URL=postgresql://sequencer:secure_password@localhost:5432/sequencer_production
+pnpm --filter @shielded-x402/credit-sequencer migrate:up
+```
+
+## Step 4: Configure Credit Sequencer
+
+Create `services/credit-sequencer/.env.production`:
+
+```bash
+# Database
+SEQUENCER_DATABASE_URL=postgresql://sequencer:secure_password@db.example.com:5432/sequencer_production
+
+# Signing
+SEQUENCER_SIGNING_PRIVATE_KEY=0xabcd1234...  # 32-byte Ed25519 seed
+SEQUENCER_SIGNING_KEY_ID=seq-prod-1
+SEQUENCER_LEAF_SALT_SECRET=0x9876fedc...  # 32-byte secret
+
+# Supported chains
+SEQUENCER_SUPPORTED_CHAIN_REFS=eip155:84532,solana:devnet
+
+# Timing
+SEQUENCER_EPOCH_SECONDS=3600
+SEQUENCER_EXECUTION_GRACE_SECONDS=300
+SEQUENCER_SWEEPER_SECONDS=30
+
+# Security
+SEQUENCER_ADMIN_TOKEN=random-secure-admin-token-here
+
+# Relayer public keys (base64 or hex of Ed25519 public keys)
+SEQUENCER_RELAYER_KEYS_JSON='{"eip155:84532":{"rel-base-1":"0x1234..."}}'
+
+# Base commitment posting
+SEQUENCER_BASE_REGISTRY_ADDRESS=0x...  # From Step 2
+SEQUENCER_BASE_POSTER_PRIVATE_KEY=0x...  # ECDSA private key
+SEQUENCER_BASE_RPC_URL=https://sepolia.base.org
+```
+
+### Generate Sequencer Keys
+
+```bash
+# Generate Ed25519 keypair
+node -e "const ed = require('@noble/ed25519'); const seed = ed.utils.randomPrivateKey(); console.log('Private:', Buffer.from(seed).toString('hex')); console.log('Public:', Buffer.from(ed.getPublicKey(seed)).toString('hex'));"
+```
+
+## Step 5: Configure Payment Relayers
+
+### 5.1 Base Sepolia Relayer
+
+Create `services/payment-relayer/.env.base-sepolia`:
+
+```bash
+# Chain binding
+RELAYER_CHAIN_REF=eip155:84532
+RELAYER_PORT=3100
+
+# Sequencer connection
+RELAYER_SEQUENCER_URL=https://sequencer.shielded.example.com
+RELAYER_SEQUENCER_KEYS_JSON='{"seq-prod-1":"0x..."}'
+
+# Relayer identity
+RELAYER_REPORTING_PRIVATE_KEY=0x...  # Ed25519 for reporting
+RELAYER_KEY_ID=rel-base-sepolia-1
+
+# Payout configuration
+RELAYER_PAYOUT_MODE=evm
+RELAYER_EVM_PRIVATE_KEY=0x...  # ECDSA for transactions
+
+# Security
+RELAYER_CALLER_AUTH_TOKEN=random-secure-relayer-token
+RELAYER_RATE_LIMIT_PER_MINUTE=180
+```
+
+### 5.2 Solana Devnet Relayer (Optional)
+
+Create `services/payment-relayer/.env.solana-devnet`:
+
+```bash
+# Chain binding
+RELAYER_CHAIN_REF=solana:devnet
+RELAYER_PORT=3101
+
+# Sequencer connection
+RELAYER_SEQUENCER_URL=https://sequencer.shielded.example.com
+RELAYER_SEQUENCER_KEYS_JSON='{"seq-prod-1":"0x..."}'
+
+# Relayer identity
+RELAYER_REPORTING_PRIVATE_KEY=0x...  # Ed25519
+RELAYER_KEY_ID=rel-solana-devnet-1
+
+# Payout configuration
+RELAYER_PAYOUT_MODE=solana
+
+# Security
+RELAYER_CALLER_AUTH_TOKEN=random-secure-relayer-token
+RELAYER_RATE_LIMIT_PER_MINUTE=180
+```
+
+## Step 6: Deploy Services
+
+### 6.1 Build Applications
+
+```bash
+pnpm build
+```
+
+### 6.2 Deploy Sequencer
+
+Example using Docker:
+
+```dockerfile
+FROM node:18-alpine
+WORKDIR /app
+COPY package.json pnpm-lock.yaml ./
+COPY services/credit-sequencer ./services/credit-sequencer
+RUN npm install -g pnpm && pnpm install --frozen-lockfile
+RUN pnpm --filter @shielded-x402/credit-sequencer build
+EXPOSE 3000
+CMD ["pnpm", "--filter", "@shielded-x402/credit-sequencer", "start"]
+```
+
+Deploy to your hosting platform:
+
+```bash
+# Example: Railway
+railway up
+
+# Example: Fly.io
+fly deploy
+```
+
+### 6.3 Deploy Relayers
+
+Deploy each relayer as a separate service:
+
+```bash
+# Base relayer
+RELAYER_CHAIN_REF=eip155:84532 railway up
+
+# Solana relayer
+RELAYER_CHAIN_REF=solana:devnet railway up
+```
+
+## Step 7: Verify Deployment
+
+### 7.1 Health Checks
+
+Check sequencer:
+
+```bash
+curl https://sequencer.shielded.example.com/health
+# Response: {"status":"ok"}
+
+curl https://sequencer.shielded.example.com/health/ready
+# Response: {"status":"ready"}
+```
+
+Check relayers:
+
+```bash
+curl https://relayer-base.shielded.example.com/health
+curl https://relayer-solana.shielded.example.com/health
+```
+
+### 7.2 Test Credit Flow
+
+Allocate credit to a test agent:
+
+```bash
+curl -X POST https://sequencer.shielded.example.com/v1/admin/credit \
+  -H "Authorization: Bearer $SEQUENCER_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agentId": "test-agent-1",
+    "amount": 1000000,
+    "chainRef": "eip155:84532"
+  }'
+```
+
+Request authorization:
+
+```bash
+curl -X POST https://sequencer.shielded.example.com/v1/credit/authorize \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agentId": "test-agent-1",
+    "chainRef": "eip155:84532",
+    "amount": 10000,
+    "merchantMemo": "test-payment"
+  }'
+```
+
+## Step 8: Monitoring & Observability
+
+### 8.1 Prometheus Metrics
+
+All services expose `/metrics` endpoints:
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: 'sequencer'
+    static_configs:
+      - targets: ['sequencer.shielded.example.com:3000']
+  
+  - job_name: 'relayer-base'
+    static_configs:
+      - targets: ['relayer-base.shielded.example.com:3100']
+  
+  - job_name: 'relayer-solana'
+    static_configs:
+      - targets: ['relayer-solana.shielded.example.com:3101']
+```
+
+### 8.2 Database Monitoring
+
+Monitor PostgreSQL:
+
+- Connection pool usage
+- Query performance
+- Table sizes
+- Replication lag (if using replicas)
+
+### 8.3 Alerting
+
+Set up alerts for:
+
+- Service health endpoint failures
+- Database connection errors
+- High execution report failure rate
+- Commitment epoch build failures
+- Relayer balance running low (for EVM/Solana modes)
+
+## Production Checklist
+
+<AccordionGroup>
+  <Accordion title="Security">
+    - [ ] All private keys stored in secrets manager (not .env files)
+    - [ ] `SEQUENCER_ADMIN_TOKEN` set to strong random value
+    - [ ] `RELAYER_CALLER_AUTH_TOKEN` set for all relayers
+    - [ ] `RELAYER_ALLOWED_HOSTS` configured for forward mode
+    - [ ] Database credentials rotated regularly
+    - [ ] TLS/HTTPS enabled for all services
+    - [ ] Rate limiting configured (`RELAYER_RATE_LIMIT_PER_MINUTE`)
+  </Accordion>
+  
+  <Accordion title="Infrastructure">
+    - [ ] PostgreSQL backups configured (daily minimum)
+    - [ ] Database connection pooling enabled (PgBouncer)
+    - [ ] Services deployed with auto-restart policies
+    - [ ] Load balancer configured for sequencer (if needed)
+    - [ ] CDN/caching for static content (if applicable)
+    - [ ] Monitoring and alerting configured
+    - [ ] Log aggregation configured (e.g., Datadog, Grafana Loki)
+  </Accordion>
+  
+  <Accordion title="Blockchain">
+    - [ ] Contracts deployed to production networks
+    - [ ] Contract ownership transferred to multisig (if applicable)
+    - [ ] Verifier contract tested with production proofs
+    - [ ] RPC endpoints have sufficient rate limits/quotas
+    - [ ] Relayer wallets funded with native gas tokens
+    - [ ] Base commitment poster wallet funded
+  </Accordion>
+  
+  <Accordion title="Testing">
+    - [ ] End-to-end test with production configuration
+    - [ ] Load testing completed
+    - [ ] Failover scenarios tested
+    - [ ] Database migration rollback tested
+    - [ ] Monitoring dashboards validated
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+### Sequencer Issues
+
+**Database connection errors:**
+```bash
+# Check database connectivity
+psql $SEQUENCER_DATABASE_URL -c "SELECT 1;"
+
+# Verify migrations
+pnpm --filter @shielded-x402/credit-sequencer migrate:status
+```
+
+**Invalid relayer signatures:**
+- Verify relayer public keys in `SEQUENCER_RELAYER_KEYS_JSON`
+- Ensure keys are in correct format (hex with 0x prefix)
+- Check that relayer is using matching `RELAYER_KEY_ID`
+
+### Relayer Issues
+
+**Failed to verify sequencer authorization:**
+- Verify sequencer public key in `RELAYER_SEQUENCER_KEYS_JSON`
+- Check that sequencer is using matching `SEQUENCER_SIGNING_KEY_ID`
+
+**EVM payout failures:**
+- Check `RELAYER_EVM_PRIVATE_KEY` has sufficient gas
+- Verify RPC endpoint is responsive
+- Check gas price estimates
+
+**Solana payout failures:**
+- Verify payer keypair has sufficient SOL
+- Check program IDs are correct for network
+- Validate RPC/WebSocket endpoints
+
+### Contract Issues
+
+**ShieldedPool proof verification failures:**
+- Ensure verifier contract matches proof system version
+- Verify public inputs are correctly formatted
+- Check that proof was generated for correct circuit
+
+**CreditChannelSettlement signature errors:**
+- Verify EIP-712 domain separator matches chain ID
+- Check that both signatures are present and valid
+- Ensure state totals don't exceed escrowed amount
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Sequencer Reference" icon="server" href="/infrastructure/sequencer">
+    Detailed sequencer configuration
+  </Card>
+  <Card title="Relayer Reference" icon="network-wired" href="/infrastructure/relayer">
+    Detailed relayer configuration
+  </Card>
+  <Card title="Contracts Reference" icon="file-contract" href="/infrastructure/contracts">
+    Smart contract documentation
+  </Card>
+  <Card title="Client SDK" icon="code" href="/client-sdk/overview">
+    Integrate with your application
+  </Card>
+</CardGroup>

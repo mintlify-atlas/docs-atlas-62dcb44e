@@ -1,0 +1,228 @@
+---
+title: 'Commitment tracking'
+description: 'Query commitment roots and inclusion proofs for authorizations'
+---
+
+The sequencer periodically commits authorization batches to a Merkle tree and posts the root on-chain. These endpoints allow you to track commitments and generate inclusion proofs for authorizations.
+
+## Get latest commitment
+
+<ParamField path="/v1/commitments/latest" type="GET">
+  Retrieve the most recent commitment epoch.
+</ParamField>
+
+### Response
+
+<ResponseField name="latestEpochId" type="string" required>
+  Uint64 string of the latest epoch ID. Returns `0` if no commitments exist.
+</ResponseField>
+
+<ResponseField name="root" type="string" required>
+  32-byte hex Merkle root of the commitment. Returns zero hash if no commitments exist.
+</ResponseField>
+
+<ResponseField name="count" type="number">
+  Number of authorization leaves in this epoch.
+</ResponseField>
+
+<ResponseField name="prevRoot" type="string">
+  32-byte hex root of the previous epoch.
+</ResponseField>
+
+<ResponseField name="sequencerKeyId" type="string">
+  Identifier of the sequencer key that created the commitment.
+</ResponseField>
+
+<ResponseField name="postedAt" type="string">
+  Uint64 Unix timestamp when the commitment was posted on-chain. Null if not yet posted.
+</ResponseField>
+
+<ResponseField name="postedTxHash" type="string">
+  Transaction hash of the on-chain commitment post. Null if not yet posted.
+</ResponseField>
+
+### Example
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://sequencer.example.com/v1/commitments/latest
+```
+
+```javascript JavaScript
+const response = await fetch('https://sequencer.example.com/v1/commitments/latest');
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.get('https://sequencer.example.com/v1/commitments/latest')
+data = response.json()
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200 Success
+{
+  "latestEpochId": "42",
+  "root": "0xaabbccdd11223344556677889900aabbccdd11223344556677889900aabbccdd",
+  "count": 150,
+  "prevRoot": "0x1122334455667788990011223344556677889900112233445566778899001122",
+  "sequencerKeyId": "seq-key-1",
+  "postedAt": "1735689900",
+  "postedTxHash": "0x9988776655443322119988776655443322119988776655443322119988776655"
+}
+```
+
+```json 200 No commitments
+{
+  "latestEpochId": "0",
+  "root": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "postedAt": null
+}
+```
+
+</ResponseExample>
+
+---
+
+## Get inclusion proof
+
+<ParamField path="/v1/commitments/proof" type="GET">
+  Generate a Merkle inclusion proof for a specific authorization.
+</ParamField>
+
+### Query parameters
+
+<ParamField query="authId" type="string" required>
+  32-byte hex identifier of the authorization to generate a proof for.
+</ParamField>
+
+### Response
+
+<ResponseField name="epochId" type="string" required>
+  Uint64 string of the epoch containing this authorization.
+</ResponseField>
+
+<ResponseField name="root" type="string" required>
+  32-byte hex Merkle root of the commitment epoch.
+</ResponseField>
+
+<ResponseField name="leafHash" type="string" required>
+  32-byte hex hash of the authorization leaf.
+</ResponseField>
+
+<ResponseField name="merkleProof" type="array" required>
+  Array of 32-byte hex sibling hashes for the Merkle proof.
+</ResponseField>
+
+<ResponseField name="leafIndex" type="number" required>
+  Zero-based index of the leaf in the Merkle tree.
+</ResponseField>
+
+<ResponseField name="logSeqNo" type="string" required>
+  Uint64 string of the authorization's sequence number in the append-only log.
+</ResponseField>
+
+<ResponseField name="prevRoot" type="string" required>
+  32-byte hex root of the previous epoch.
+</ResponseField>
+
+<ResponseField name="authId" type="string" required>
+  32-byte hex identifier of the authorization.
+</ResponseField>
+
+<ResponseField name="leafSalt" type="string" required>
+  32-byte hex salt used in the leaf computation (derived from sequencer secret).
+</ResponseField>
+
+<ResponseField name="sequencerKeyId" type="string" required>
+  Identifier of the sequencer key.
+</ResponseField>
+
+<ResponseField name="commitTxHash" type="string">
+  Transaction hash of the on-chain commitment. Only present if the commitment has been posted.
+</ResponseField>
+
+### Error codes
+
+| Code | Description |
+|------|-------------|
+| `NOT_FOUND` | Authorization not found or not yet committed |
+| `authorization not found` | AuthId doesn't exist |
+| `authorization leaf not found` | Leaf data missing |
+| `authorization not committed yet` | Authorization hasn't been included in a commitment epoch |
+| `commitment epoch not found` | Epoch data missing |
+| `commitment root mismatch for epoch` | Internal consistency error in Merkle tree |
+
+### Example
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url 'https://sequencer.example.com/v1/commitments/proof?authId=0x1122334455667788990011223344556677889900112233445566778899001122'
+```
+
+```javascript JavaScript
+const authId = '0x1122334455667788990011223344556677889900112233445566778899001122';
+const response = await fetch(
+  `https://sequencer.example.com/v1/commitments/proof?authId=${authId}`
+);
+const proof = await response.json();
+```
+
+```python Python
+import requests
+
+auth_id = '0x1122334455667788990011223344556677889900112233445566778899001122'
+response = requests.get(
+    'https://sequencer.example.com/v1/commitments/proof',
+    params={'authId': auth_id}
+)
+proof = response.json()
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200 Success
+{
+  "epochId": "42",
+  "root": "0xaabbccdd11223344556677889900aabbccdd11223344556677889900aabbccdd",
+  "leafHash": "0x5566778899001122334455667788990011223344556677889900112233445566",
+  "merkleProof": [
+    "0x1111111111111111111111111111111111111111111111111111111111111111",
+    "0x2222222222222222222222222222222222222222222222222222222222222222",
+    "0x3333333333333333333333333333333333333333333333333333333333333333"
+  ],
+  "leafIndex": 73,
+  "logSeqNo": "1542",
+  "prevRoot": "0x1122334455667788990011223344556677889900112233445566778899001122",
+  "authId": "0x1122334455667788990011223344556677889900112233445566778899001122",
+  "leafSalt": "0x4444444444444444444444444444444444444444444444444444444444444444",
+  "sequencerKeyId": "seq-key-1",
+  "commitTxHash": "0x9988776655443322119988776655443322119988776655443322119988776655"
+}
+```
+
+```json 404 Not found
+{
+  "error": "authorization not found",
+  "code": "NOT_FOUND"
+}
+```
+
+```json 404 Not committed
+{
+  "error": "authorization not committed yet",
+  "code": "NOT_FOUND"
+}
+```
+
+</ResponseExample>

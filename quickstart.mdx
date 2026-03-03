@@ -1,80 +1,318 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Run a complete multi-chain payment flow in under 5 minutes
 ---
 
-## Get started in three steps
-
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide walks you through running a complete dual-chain payment example using the Shielded x402 protocol. You'll authorize and execute payments on both Base and Solana relayers using a single sequencer credit balance.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  The multi-chain example demonstrates sequencer-authorized fast execution. For anonymous proof-backed payments, see the [shielded fetch integration guide](/client-sdk/shielded-fetch).
 </Note>
+
+## Prerequisites
+
+You need the following installed:
+
+- **Node.js** 18+ and **pnpm** 8+
+- **Foundry** for Solidity contract tests
+- **PostgreSQL** 14+ running locally
+- **Solana CLI** tools (for devnet deployment)
+
+## Step 1: Clone and Build
+
+Clone the repository and install dependencies:
+
+```bash
+git clone https://github.com/your-org/shielded-x402.git
+cd shielded-x402
+
+pnpm install
+pnpm contracts:deps
+pnpm build
+```
+
+Verify the build with a contract test:
+
+```bash
+pnpm contracts:test --match-path test/CommitmentRegistryV1.t.sol
+```
+
+<Tip>
+  Run `pnpm typecheck` to verify TypeScript types across all packages.
+</Tip>
+
+## Step 2: Start the Local Stack
+
+The development stack includes:
+
+- **Credit Sequencer** (port 3200): Authorizes intents and tracks credit balances
+- **Base Relayer** (port 3100): Executes EVM payments in noop or onchain mode
+- **Solana Relayer** (port 3101): Executes Solana devnet transactions
+
+Start all services:
+
+```bash
+pnpm dev:stack:start
+```
+
+<Warning>
+  Ensure PostgreSQL is running and accessible at the connection string configured in `services/credit-sequencer/.env`. The sequencer will fail to start without a database connection.
+</Warning>
+
+Verify services are healthy:
+
+```bash
+curl http://127.0.0.1:3200/health  # Sequencer
+curl http://127.0.0.1:3100/health  # Base relayer
+curl http://127.0.0.1:3101/health  # Solana relayer
+```
+
+## Step 3: Deploy Solana Programs
+
+The Solana relayer requires two onchain programs:
+
+1. **Verifier Program**: Groth16 proof verification using Sunspot
+2. **Gateway Program**: x402 payment settlement with CPI verify
+
+Deploy and initialize:
+
+<Steps>
+  <Step title="Install Solana client dependencies">
+    ```bash
+    pnpm --dir chains/solana/client install
+    ```
+  </Step>
+  <Step title="Deploy the verifier program">
+    ```bash
+    bash chains/solana/scripts/deploy-verifier.sh
+    ```
+    
+    Save the printed `SOLANA_VERIFIER_PROGRAM_ID` for the next step.
+  </Step>
+  <Step title="Deploy the gateway program">
+    ```bash
+    bash chains/solana/scripts/deploy-gateway.sh
+    ```
+    
+    Save the printed `SOLANA_GATEWAY_PROGRAM_ID`.
+  </Step>
+  <Step title="Initialize gateway state">
+    ```bash
+    pnpm tsx chains/solana/scripts/init-gateway.ts
+    ```
+    
+    This creates the PDA state account. Save the `SOLANA_STATE_ACCOUNT` address.
+  </Step>
+</Steps>
+
+<Note>
+  The deployment scripts use `solana config get` to determine your keypair and RPC URL. Ensure you're configured for Solana devnet before deploying.
+</Note>
+
+## Step 4: Configure Environment
+
+Set required environment variables for the example:
+
+```bash .env
+export SEQUENCER_URL=http://127.0.0.1:3200
+export BASE_RELAYER_URL=http://127.0.0.1:3100
+export SOLANA_RELAYER_URL=http://127.0.0.1:3101
+export SEQUENCER_ADMIN_TOKEN=change-me
+
+# From Solana deployment
+export SOLANA_GATEWAY_PROGRAM_ID=<your_gateway_program_id>
+export SOLANA_VERIFIER_PROGRAM_ID=<your_verifier_program_id>
+export SOLANA_STATE_ACCOUNT=<your_state_account>
+export SOLANA_PAYER_KEYPAIR_PATH=~/.config/solana/id.json
+export SOLANA_RECIPIENT_ADDRESS=<recipient_pubkey>
+
+# Solana RPC endpoints
+export SOLANA_RPC_URL=https://api.devnet.solana.com
+export SOLANA_WS_URL=wss://api.devnet.solana.com
+```
+
+<Tip>
+  For local smoke testing, the Base relayer runs in `noop` mode by default—no onchain transactions required. To test real Base Sepolia payments, see [Step 6](#step-6-optional-enable-base-onchain-mode).
+</Tip>
+
+## Step 5: Run the Multi-Chain Example
+
+Execute the dual-chain payment flow:
+
+```bash
+pnpm example:multi-chain:base-solana
+```
+
+The example performs the following operations:
+
+<Steps>
+  <Step title="Generate agent keypair">
+    Creates an Ed25519 keypair for signing payment intents. The `agentId` is derived from the public key hash.
+  </Step>
+  <Step title="Credit agent balance">
+    Calls `POST /v1/admin/credit` to seed the agent's sequencer balance with 5,000,000 micros ($5.00 USD equivalent).
+    
+    <Warning>
+      `POST /v1/admin/credit` is a **test-only** endpoint. Production systems must fund balances via shielded settlement outputs.
+    </Warning>
+  </Step>
+  <Step title="Authorize Base payment">
+    Constructs an `IntentV1` for 1,500,000 micros on `eip155:8453`, signs it with the agent's private key, and sends `AuthorizeRequestV1` to the sequencer.
+    
+    The sequencer validates nonce ordering and balance sufficiency, then returns `AuthorizationV1` with a sequencer signature.
+  </Step>
+  <Step title="Execute Base relay payment">
+    Sends `RelayPayRequestV1` to the Base relayer with the signed authorization. The relayer:
+    
+    - Verifies the sequencer signature
+    - Calls the merchant endpoint (noop adapter by default)
+    - Reports execution via `POST /v1/credit/executions`
+    - Returns merchant response to agent
+  </Step>
+  <Step title="Authorize Solana payment">
+    Repeats the authorization flow for Solana with `agentNonce: '1'` (strictly increasing) and 2,500,000 micros.
+  </Step>
+  <Step title="Execute Solana relay payment">
+    The Solana relayer:
+    
+    - Builds an SPL transaction with `authId` and `authExpiryUnix`
+    - Submits to the gateway program for CPI verification
+    - Returns the transaction signature as `executionTxHash`
+  </Step>
+</Steps>
+
+Successful output:
+
+```bash
+=== Multi-chain flow complete ===
+agentId: 0xa4f3c8e9d2b7a1f0...
+base authId: 0x7b3e9a2f8c1d4e5a...
+base relay result: {
+  "executionTxHash": "0xnoop-deterministic-hash-base",
+  "status": "SUCCESS",
+  "merchantResponse": { "flow": "base-payment" }
+}
+solana authId: 0x9d2e8b3f7a4c1e6d...
+solana relay result: {
+  "executionTxHash": "5K7Zj3xQw...",  # Real Solana tx signature
+  "status": "SUCCESS",
+  "merchantResponse": { "confirmed": true }
+}
+```
+
+## Step 6 (Optional): Enable Base Onchain Mode
+
+To execute real EVM transactions on Base Sepolia:
+
+<Steps>
+  <Step title="Configure Base relayer for EVM mode">
+    Edit `services/payment-relayer/.env`:
+    
+    ```bash
+    RELAYER_BASE_CHAIN_REF=eip155:84532
+    RELAYER_BASE_PAYOUT_MODE=evm
+    RELAYER_EVM_PRIVATE_KEY=0x<your_funded_private_key>
+    ```
+  </Step>
+  <Step title="Restart the stack">
+    ```bash
+    pnpm dev:stack:stop
+    pnpm dev:stack:start
+    ```
+  </Step>
+  <Step title="Set Base example environment variables">
+    ```bash
+    export BASE_ONCHAIN=true
+    export BASE_RPC_URL=https://sepolia.base.org
+    export BASE_CHAIN_ID=84532
+    export BASE_RECIPIENT_ADDRESS=0x<recipient_address>
+    export BASE_PAYMENT_WEI=1000000000000  # 0.000001 ETH
+    ```
+  </Step>
+  <Step title="Run the example">
+    ```bash
+    pnpm example:multi-chain:base-solana
+    ```
+    
+    The Base relayer will now submit real transactions and return actual transaction hashes.
+  </Step>
+</Steps>
+
+## Step 7: Verify Commitments
+
+Enable commitment epoch posting to test auditability:
+
+```bash
+export RUN_COMMITMENT_EPOCH=true
+pnpm example:multi-chain:base-solana
+```
+
+The example will trigger `POST /v1/commitments/run` and fetch inclusion proofs:
+
+```bash
+base commitment epoch: 1
+solana commitment epoch: 1
+```
+
+Manually fetch a proof:
+
+```bash
+curl "http://127.0.0.1:3200/v1/commitments/proof?authId=0x7b3e9a2f8c1d4e5a..."
+```
+
+Response:
+
+```json
+{
+  "epochId": "1",
+  "leafHash": "0x9a3e7f2d8b4c1e6a...",
+  "leafIndex": 0,
+  "proof": [
+    "0x4e8d2a7f3b9c1e6d...",
+    "0x7a3f9e2d8b4c1e6a..."
+  ],
+  "metadata": {
+    "root": "0x2f8e9a3d7b4c1e6a...",
+    "count": 2,
+    "sequencerKeyId": "sequencer-key-1"
+  }
+}
+```
+
+<Note>
+  In production, the sequencer posts commitment roots to `CommitmentRegistryV1` on Base mainnet hourly. Anyone can verify authorization inclusion by reconstructing the merkle path.
+</Note>
+
+## Cleanup
+
+Stop all running services:
+
+```bash
+pnpm dev:stack:stop
+```
+
+## What You Learned
+
+You successfully:
+
+- Started a local sequencer + dual relayer stack
+- Deployed Solana verification programs to devnet
+- Authorized and executed payments on Base (noop) and Solana (onchain)
+- Verified commitment inclusion proofs
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="SDK Integration" icon="code" href="/client-sdk/overview">
+    Integrate `MultiChainCreditClient` into your application
+  </Card>
+  <Card title="Shielded Fetch" icon="shield" href="/client-sdk/shielded-fetch">
+    Learn anonymous proof-backed x402 payments
+  </Card>
+  <Card title="Merchant Setup" icon="store" href="/merchant-sdk/integration">
+    Accept x402 payments in your API
+  </Card>
+  <Card title="API Reference" icon="book" href="/api/sequencer/authorize">
+    Explore sequencer and relayer endpoints
+  </Card>
+</CardGroup>

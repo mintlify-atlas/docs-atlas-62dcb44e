@@ -1,0 +1,127 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Shielded x402",
+  "projectDescription": "Privacy-preserving multi-chain payment protocol SDK with zero-knowledge proofs and credit-based settlement",
+  "theme": "aspen",
+  "primaryColor": "#6366f1",
+  "lightColor": "#818cf8",
+  "darkColor": "#4f46e5",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/protocol-flow",
+              "concepts/credit-system",
+              "concepts/shielded-payments"
+            ]
+          },
+          {
+            "group": "Client SDK",
+            "pages": [
+              "client-sdk/overview",
+              "client-sdk/shielded-client",
+              "client-sdk/multi-chain-credit",
+              "client-sdk/shielded-fetch",
+              "client-sdk/note-management"
+            ]
+          },
+          {
+            "group": "Merchant SDK",
+            "pages": [
+              "merchant-sdk/overview",
+              "merchant-sdk/integration",
+              "merchant-sdk/verification"
+            ]
+          },
+          {
+            "group": "Infrastructure",
+            "pages": [
+              "infrastructure/sequencer",
+              "infrastructure/relayer",
+              "infrastructure/contracts",
+              "infrastructure/deployment"
+            ]
+          },
+          {
+            "group": "Multi-Chain Support",
+            "pages": [
+              "chains/overview",
+              "chains/base-evm",
+              "chains/solana"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/examples",
+              "guides/testing",
+              "guides/migration"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Sequencer API",
+            "pages": [
+              "api/sequencer/authorize",
+              "api/sequencer/executions",
+              "api/sequencer/reclaim",
+              "api/sequencer/commitments"
+            ]
+          },
+          {
+            "group": "Relayer API",
+            "pages": [
+              "api/relayer/pay"
+            ]
+          },
+          {
+            "group": "Protocol",
+            "pages": [
+              "api/protocol/data-structures",
+              "api/protocol/signatures",
+              "api/protocol/cryptography"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Privacy-preserving payments with zero-knowledge proofs",
+    "Multi-chain support (Base/EVM and Solana)",
+    "Credit-based authorization system",
+    "Shielded settlement and anonymous transactions",
+    "Real-time nonce and balance enforcement",
+    "Commitment-based delayed auditability"
+  ],
+  "publicApiSurface": [
+    "ShieldedClientSDK",
+    "MultiChainCreditClient",
+    "createShieldedFetch",
+    "LocalNoteIndexer",
+    "buildWitnessFromCommitments",
+    "POST /v1/credit/authorize",
+    "POST /v1/credit/executions",
+    "POST /v1/credit/reclaim",
+    "GET /v1/commitments/latest",
+    "GET /v1/commitments/proof",
+    "POST /v1/relay/pay"
+  ]
+}
